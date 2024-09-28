@@ -13,3 +13,4 @@ lanceotron-mcc/filtered.bed
 lanceotron-mcc/TMP.bw
 lanceotron-mcc/unfiltered.bed
 myb_peaks.bed
+lanceotron-mcc/test_peak_calling.ipynb
