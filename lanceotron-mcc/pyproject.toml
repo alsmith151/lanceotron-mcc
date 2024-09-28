@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools >= 61.0", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plotnado"
+authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk"} ]
+description = "Quick re-write of LanceOTron2 for MCC"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GNU GENERAL PUBLIC LICENSE Version 3" }
+dynamic = ["version", "dependencies"]
+# scripts = { "plotnado" =  "plotnado.cli.cli:main" }
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools]
+packages = ["lanceotron_mcc"]
+include-package-data = true
+
+[tool.setuptools_scm]
+local_scheme = "no-local-version"
+write_to = "lanceotron_mcc/_version.py"
+
+[project.urls]
+Homepage = "https://github.com/alsmith151/lanceotron-mcc"

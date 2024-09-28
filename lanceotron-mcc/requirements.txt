@@ -1,0 +1,9 @@
+loguru
+numpy<2
+pandas<2
+polars==1.8.2
+pyBigWig<=0.3.18
+pydantic<2
+pyranges
+torch<=2.4
+tqdm
