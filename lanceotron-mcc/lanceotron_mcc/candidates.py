@@ -9,7 +9,6 @@ import pathlib
 from loguru import logger
 import pyranges as pr
 import tqdm
-import concurrent.futures
 
 from .signal import average_array, find_enriched_regions
 from .utils import Chromosomes, ChromosomeStats

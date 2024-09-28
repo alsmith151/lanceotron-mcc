@@ -7,11 +7,6 @@ import polars as pl
 import pyBigWig
 import pydantic
 import pyranges as pr
-import ray
-import scipy.ndimage
-import scipy.sparse
-import scipy.sparse.lil
-import tqdm
 from loguru import logger
 
 

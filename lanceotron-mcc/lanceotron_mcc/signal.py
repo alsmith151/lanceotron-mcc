@@ -1,9 +1,7 @@
 import pathlib
 import numpy as np
-import numba
 import pandas as pd
 import pyranges as pr
-from scipy.sparse import csc_array, diags, csr_array
 from typing import Union, List, Tuple, Dict, Optional, Any
 import pyBigWig
 
