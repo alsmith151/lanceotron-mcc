@@ -55,7 +55,16 @@ class Chromosomes:
         return cls(chromosomes=chromosomes)
 
     def sample(self, n: int):
-        return Chromosomes(chromosomes=np.random.choice(list(self.chromosomes), n))
+
+        chroms = list(self.chromosomes)
+        chroms_sampled = list(np.random.choice(chroms, n))
+        return Chromosomes(chromosomes=chroms_sampled)
+    
+    def __str__(self):
+        return f"Chromosomes({self.chromosomes})"
+
+    def __format__(self, format_spec: str) -> str:
+        return f"Chromosomes({self.chromosomes})"
     
     def __add__(self, other):
         

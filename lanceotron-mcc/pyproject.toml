@@ -3,7 +3,7 @@ requires = ["setuptools >= 61.0", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lanceotron-mcc"
+name = "lanceotron_mcc"
 authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk"} ]
 description = "Quick re-write of LanceOTron2 for MCC"
 readme = "README.md"
@@ -11,13 +11,13 @@ requires-python = ">=3.10"
 license = { text = "GNU GENERAL PUBLIC LICENSE Version 3" }
 version = "0.1.0"
 dynamic = ["dependencies"]
-# scripts = { "plotnado" =  "plotnado.cli.cli:main" }
+scripts = { "lanceotron-mcc" =  "lanceotron_mcc.call_peaks:main" }
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools]
-packages = ["lanceotron_mcc"]
+packages = ["lanceotron_mcc", "lanceotron_mcc.api"]
 include-package-data = true
 
 # [tool.setuptools_scm]

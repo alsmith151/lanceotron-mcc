@@ -295,6 +295,9 @@ class CandidatePeakCaller:
         params: CandidatePeakCallParams = None,
         only_standard_chromosomes: bool = True,
     ):
+        if isinstance(bigwig, pathlib.Path):
+            bigwig = str(bigwig)
+
         self.bigwig = bigwig
         self.params = params or CandidatePeakCallParams()
         self.only_standard_chromosomes = only_standard_chromosomes
@@ -389,12 +392,20 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         self,
         bigwig: Union[pathlib.Path, str],
         params: CandidatePeakCallParams = None,
-        cis_chromosome: Optional[str] = None,
+        cis_chromosome: Optional[str | Literal["estimate"]] = None,
     ):
         super().__init__(bigwig, params)
-        self.cis_chromosome = cis_chromosome
+        if cis_chromosome is None or cis_chromosome == "estimate":
+            self.cis_chromosome = self.estimate_cis_chromosome()
 
     def estimate_cis_chromosome(self):
+        """
+        Estimate the cis chromosome for the viewpoint.
+
+        Returns:
+            str: Chromosome name.
+        """
+
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
         chromosomes = chromosomes.standard_chromosomes.chromosomes
         chromosomes_stats = {
@@ -415,55 +426,45 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         chromosomes_stats = chromosomes_stats.sort_values(
             "coverage_fraction", ascending=False
         )
-        return chromosomes_stats.index[0]
 
-    def set_cis_chromosome(self, chromosome: Optional[str] = None):
-        if chromosome is None:
-            self.cis_chromosome = self.estimate_cis_chromosome()
+        chrom = chromosomes_stats.index[0]
+        logger.info(f"Estimated cis chromosome: {chrom}")
+
+        return chrom
+    
+
+    def select_chromosomes(self, n_background: int = 1) -> Chromosomes:
+        chromosomes = Chromosomes.from_bigwig(self.bigwig)
+        if self.cis_chromosome:
+
+            cis_chromosome_regex = f"(chr)?{self.cis_chromosome}$"
+            chromosomes_cis = chromosomes.filter_chromosomes(include=cis_chromosome_regex)
+        
+        if n_background > 0:
+            chromosomes_background = chromosomes.standard_chromosomes.filter_chromosomes(exclude=self.cis_chromosome)
+            chromosomes_background = chromosomes_background.sample(n=n_background)
         else:
-            self.cis_chromosome = chromosome
+            chromosomes_background = Chromosomes([])        
+        return chromosomes_cis + chromosomes_background
+
+
 
     def call_candidate_peaks(self, n_background: int = 1):
         """
-        Call candidate peaks for the bigwig file.
+        Call peaks from a bigwig file.
 
         Args:
-            n_backrgound_chromosomes (int): Number of background chromosomes to sample.
-
+            n_background: Number of background chromosomes to use for estimating the background.
+        
         Returns:
             pd.DataFrame: DataFrame of candidate peaks.
-
         """
-        chromosomes = Chromosomes.from_bigwig(self.bigwig)
-
-        if self.cis_chromosome is not None and n_background > 0:
-            chromosomes_cis = chromosomes.filter_chromosomes(
-                include=self.cis_chromosome
-            )
-            chromosomes_background = (
-                chromosomes.standard_chromosomes.filter_chromosomes(
-                    exclude=self.cis_chromosome
-                )
-            )
-            chromosomes_background = chromosomes_background.sample(n_background)
-            chromosomes = chromosomes_cis + chromosomes_background
-
-        elif self.cis_chromosome is not None:
-            chromosomes = chromosomes.filter_chromosomes(include=self.cis_chromosome)
-
-        if self.only_standard_chromosomes:
-            chromosomes = chromosomes.standard_chromosomes.chromosomes
-        else:
-            chromosomes = chromosomes.chromosomes
+        chromosomes = self.select_chromosomes(n_background)
 
         df_peaks = pd.DataFrame()
-        logger.info(f"Calling candidate peaks for chromosomes: {chromosomes}")
+        logger.info(f'Calling candidate peaks for chromosomes: {chromosomes.chromosomes}')
 
-        for chrom in tqdm.tqdm(
-            chromosomes,
-            desc="Calling candidate peaks for chromosomes",
-            total=len(chromosomes),
-        ):
+        for chrom in chromosomes.chromosomes:
             chromosome_stats = self.calculate_chromosome_stats(chrom)
             coverage_array = self.extract_chromosome_signal(
                 chromosome_stats, tensor=True

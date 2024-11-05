@@ -14,3 +14,8 @@ lanceotron-mcc/TMP.bw
 lanceotron-mcc/unfiltered.bed
 myb_peaks.bed
 lanceotron-mcc/test_peak_calling.ipynb
+lanceotron-mcc/lanceotron_mcc/__pycache__/call_peaks.cpython-310.pyc
+lanceotron-mcc/lanceotron_mcc/api/__pycache__/__init__.cpython-310.pyc
+lanceotron-mcc/lanceotron_mcc/api/__pycache__/candidates.cpython-310.pyc
+lanceotron-mcc/lanceotron_mcc/api/__pycache__/signal.cpython-310.pyc
+lanceotron-mcc/lanceotron_mcc/api/__pycache__/utils.cpython-310.pyc
