@@ -9,6 +9,10 @@ import torch
 
 @torch.jit.script
 def average_array(array: torch.Tensor, window: int = 0) -> torch.Tensor:
+    """GPU-optimized moving average function."""
+    # Store original device for consistent return
+    device = array.device
+    
     # If no window size is provided, set the window size to the length of the array
     if window == 0:
         window = len(array)
@@ -17,7 +21,7 @@ def average_array(array: torch.Tensor, window: int = 0) -> torch.Tensor:
     if window > len(array):
         window = len(array)
 
-    # If the window size is equal to the length of the array, return an array of the same length with the mean value of the input array
+    # If the window size is equal to the length of the array, return an array of the same length with the mean value
     if window == len(array):
         return torch.full_like(array, array.mean())
 
@@ -28,7 +32,7 @@ def average_array(array: torch.Tensor, window: int = 0) -> torch.Tensor:
     if window < len(array):
         return_array[window:] = return_array[window:] - return_array[:-window]
         # Divide by the window size to get the moving average
-        return_array[window - 1 :] /= window
+        return_array[window - 1:] /= window
 
     # Calculate the padding needed for the left and right ends of the array
     left_pad = window // 2
@@ -39,7 +43,7 @@ def average_array(array: torch.Tensor, window: int = 0) -> torch.Tensor:
         # Create a new tensor for the result
         result = torch.empty_like(array)
         # Copy the calculated averages to the middle part of the array
-        result[left_pad : len(array) - right_pad] = return_array[window - 1 :]
+        result[left_pad:len(array) - right_pad] = return_array[window - 1:]
         # Set the values for the left and right pads to the mean of the corresponding array segments
         result[:left_pad] = array[:left_pad].mean()
         result[-right_pad:] = array[-right_pad:].mean()

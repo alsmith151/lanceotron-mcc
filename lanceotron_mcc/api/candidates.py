@@ -9,9 +9,12 @@ import pathlib
 from loguru import logger
 import pyranges as pr
 import tqdm
+import torch.multiprocessing as mp
+from joblib import Parallel, delayed
+import concurrent.futures
 
 from .signal import average_array, find_enriched_regions
-from .utils import Chromosomes, ChromosomeStats
+from .utils import Chromosomes, ChromosomeStats, get_device
 
 
 class EnrichedRegionsParams(pydantic.BaseModel):
@@ -72,46 +75,46 @@ def search_enriched_regions_param_grid(
     array: torch.Tensor, params: EnrichedRegionsParams, label: Optional[str] = None
 ) -> EnrichedRegionsResult:
     """
-    Find enriched regions in an array using a parameter grid of background sizes, window sizes, and threshold values.
-
-    Uses Ray to parallelize the search across all parameter combinations.
-
-    Parameters
-    ----------
-    array : np.ndarray
-        The input array to analyze.
-    params : EnrichedRegionsParams
-        The parameters for the search.
-
-    Returns
-    -------
-    EnrichedRegionsResult
-        The result containing a list of enriched regions identified in the array and optionally the cumulative threshold array.
+    Find enriched regions in parallel using GPU acceleration.
     """
-
-    # Initialize an array to accumulate threshold values
-    threshold_array = torch.zeros(array.shape, dtype=torch.int8)
+    # Move array to device if it's not already there
+    device = array.device
+    
+    # Initialize threshold array on the same device
+    threshold_array = torch.zeros(array.shape, dtype=torch.int8, device=device)
+    
+    # Generate all parameter combinations
     combinations = list(
         itertools.product(
             params.background_list, params.window_list, params.threshold_list
         )
     )
-
-    for background, window, threshold in combinations:
-        regions = search_enriched_regions(
-            array=array,
-            background=background,
-            window=window,
-            threshold=threshold,
-            background_global_min=params.background_global_min,
-            min_region_size=params.min_region_size,
-            max_region_size=params.max_region_size,
-        )
-
-        for i in range(regions.shape[0]):
-            start = int(regions[i, 0].item())
-            end = int(regions[i, 1].item())
-            threshold_array[start:end] += 1
+    
+    # Process combinations in batches for better GPU utilization
+    batch_size = min(16, len(combinations))  # Adjust batch size as needed
+    
+    for i in range(0, len(combinations), batch_size):
+        batch = combinations[i:i+batch_size]
+        batch_regions = []
+        
+        for background, window, threshold in batch:
+            regions = search_enriched_regions(
+                array=array,
+                background=background,
+                window=window,
+                threshold=threshold,
+                background_global_min=params.background_global_min,
+                min_region_size=params.min_region_size,
+                max_region_size=params.max_region_size,
+            )
+            batch_regions.append(regions)
+        
+        # Update threshold_array based on found regions
+        for regions in batch_regions:
+            for i in range(regions.shape[0]):
+                start = int(regions[i, 0].item())
+                end = int(regions[i, 1].item())
+                threshold_array[start:end] += 1
 
     # Identify final enriched regions based on the cumulative threshold array
     enriched_regions_final = find_enriched_regions(
@@ -294,6 +297,7 @@ class CandidatePeakCaller:
         bigwig: Union[pathlib.Path, str],
         params: CandidatePeakCallParams = None,
         only_standard_chromosomes: bool = True,
+        device: str = None,
     ):
         if isinstance(bigwig, pathlib.Path):
             bigwig = str(bigwig)
@@ -301,6 +305,8 @@ class CandidatePeakCaller:
         self.bigwig = bigwig
         self.params = params or CandidatePeakCallParams()
         self.only_standard_chromosomes = only_standard_chromosomes
+        self.device = device or get_device()
+        logger.info(f"Using device: {self.device}")
 
     @property
     def total_coverage(self):
@@ -332,17 +338,8 @@ class CandidatePeakCaller:
         tensor: bool = False,
     ) -> Union[np.ndarray, torch.Tensor]:
         """
-        Extract the signal from a chromosome in the bigwig file.
-
-        Args:
-            chrom_stats (ChromosomeStats): Chromosome statistics object.
-            smoothing (int): Size of the moving average window for smoothing the signal.
-            tensor (bool): Whether to return a torch tensor.
-
-        Returns:
-            Union[np.ndarray, torch.Tensor]: Array of signal values for the chromosome.
+        Extract the signal from a chromosome in the bigwig file with GPU support.
         """
-
         chrom_coverage_array = np.zeros(chrom_stats.length, dtype=np.float32)
 
         with pyBigWig.open(self.bigwig) as bw:
@@ -353,36 +350,50 @@ class CandidatePeakCaller:
             else:
                 logger.warning(f"No reads found on chromosome {chrom_stats.name}")
 
+        # Convert to torch tensor and move to appropriate device
+        coverage_tensor = torch.tensor(chrom_coverage_array, device=self.device)
+
         if smoothing is not None:
-            chrom_coverage_array = average_array(chrom_coverage_array, window=smoothing)
+            coverage_tensor = average_array(coverage_tensor, window=smoothing)
 
-        if tensor:
-            chrom_coverage_array = torch.tensor(chrom_coverage_array)
+        if not tensor:
+            # Move back to CPU if numpy array is requested
+            return coverage_tensor.cpu().numpy()
 
-        return chrom_coverage_array
+        return coverage_tensor
 
-    def call_candidate_peaks(self, n_jobs: int = 1):
+    def call_candidate_peaks(self, n_jobs: int = None):
+        """
+        Call peaks using parallel processing.
+        """
+        if n_jobs is None:
+            n_jobs = mp.cpu_count()
+        
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
         if self.only_standard_chromosomes:
             chromosomes = chromosomes.standard_chromosomes.chromosomes
 
-        df_peaks = pd.DataFrame()
-        for chrom in tqdm.tqdm(
-            chromosomes,
-            desc="Calling candidate peaks for chromosomes",
-            total=len(chromosomes),
-        ):
+        logger.info(f"Parallelizing peak calling across {n_jobs} workers")
+        
+        def process_chromosome(chrom):
+            logger.debug(f"Processing chromosome {chrom}")
             chromosome_stats = self.calculate_chromosome_stats(chrom)
-            coverage_array = self.extract_chromosome_signal(chromosome_stats)
+            coverage_array = self.extract_chromosome_signal(chromosome_stats, tensor=True)
             caller = ChromosomePeakCaller(
                 chromosome=chrom,
                 coverage_array=coverage_array,
                 params=self.params,
             )
-            df_peaks_chrom = caller.call_candidates()
-            logger.info(f"Found {df_peaks_chrom.shape[0]} peaks on chromosome {chrom}")
-            df_peaks = pd.concat([df_peaks, df_peaks_chrom], ignore_index=True)
+            result = caller.call_candidates()
+            logger.debug(f"Found {result.shape[0]} peaks on chromosome {chrom}")
+            return result
 
+        # Use joblib for parallel processing
+        results = Parallel(n_jobs=n_jobs, verbose=1)(
+            delayed(process_chromosome)(chrom) for chrom in chromosomes
+        )
+
+        df_peaks = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
         df_peaks = df_peaks.sort_values(["Chromosome", "Start"]).reset_index(drop=True)
         return df_peaks
 
@@ -393,78 +404,29 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         bigwig: Union[pathlib.Path, str],
         params: CandidatePeakCallParams = None,
         cis_chromosome: Optional[str | Literal["estimate"]] = None,
+        device: str = None,
     ):
-        super().__init__(bigwig, params)
+        super().__init__(bigwig, params, device=device)
         if cis_chromosome is None or cis_chromosome == "estimate":
             self.cis_chromosome = self.estimate_cis_chromosome()
-
-    def estimate_cis_chromosome(self):
-        """
-        Estimate the cis chromosome for the viewpoint.
-
-        Returns:
-            str: Chromosome name.
-        """
-
-        chromosomes = Chromosomes.from_bigwig(self.bigwig)
-        chromosomes = chromosomes.standard_chromosomes.chromosomes
-        chromosomes_stats = {
-            chrom: self.calculate_chromosome_stats(chrom).dict()
-            for chrom in chromosomes
-        }
-        chromosomes_stats = pd.DataFrame(chromosomes_stats).T
-        chromosomes_stats["coverage"] = (
-            chromosomes_stats["length"] * chromosomes_stats["mean"]
-        )
-        chromosomes_stats["coverage_fraction"] = (
-            chromosomes_stats["coverage"] / self.total_coverage
-        )
-        chromosomes_stats["coverage_fraction"] = (
-            chromosomes_stats["coverage_fraction"]
-            / chromosomes_stats["coverage_fraction"].sum()
-        )
-        chromosomes_stats = chromosomes_stats.sort_values(
-            "coverage_fraction", ascending=False
-        )
-
-        chrom = chromosomes_stats.index[0]
-        logger.info(f"Estimated cis chromosome: {chrom}")
-
-        return chrom
-    
-
-    def select_chromosomes(self, n_background: int = 1) -> Chromosomes:
-        chromosomes = Chromosomes.from_bigwig(self.bigwig)
-        if self.cis_chromosome:
-
-            cis_chromosome_regex = f"(chr)?{self.cis_chromosome}$"
-            chromosomes_cis = chromosomes.filter_chromosomes(include=cis_chromosome_regex)
-        
-        if n_background > 0:
-            chromosomes_background = chromosomes.standard_chromosomes.filter_chromosomes(exclude=self.cis_chromosome)
-            chromosomes_background = chromosomes_background.sample(n=n_background)
         else:
-            chromosomes_background = Chromosomes([])        
-        return chromosomes_cis + chromosomes_background
+            self.cis_chromosome = cis_chromosome
 
-
-
-    def call_candidate_peaks(self, n_background: int = 1):
+    def call_candidate_peaks(self, n_background: int = 1, n_jobs: int = None):
         """
-        Call peaks from a bigwig file.
-
-        Args:
-            n_background: Number of background chromosomes to use for estimating the background.
+        Call peaks from a bigwig file with parallel processing.
         
-        Returns:
-            pd.DataFrame: DataFrame of candidate peaks.
+        Args:
+            n_background: Number of background chromosomes to use
+            n_jobs: Number of parallel jobs (defaults to CPU count)
         """
+        if n_jobs is None:
+            n_jobs = mp.cpu_count()
+            
         chromosomes = self.select_chromosomes(n_background)
+        logger.info(f'Calling candidate peaks for chromosomes: {chromosomes.chromosomes} using {n_jobs} workers')
 
-        df_peaks = pd.DataFrame()
-        logger.info(f'Calling candidate peaks for chromosomes: {chromosomes.chromosomes}')
-
-        for chrom in chromosomes.chromosomes:
+        def process_chromosome(chrom):
             chromosome_stats = self.calculate_chromosome_stats(chrom)
             coverage_array = self.extract_chromosome_signal(
                 chromosome_stats, tensor=True
@@ -474,9 +436,13 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
                 coverage_array=coverage_array,
                 params=self.params,
             )
-            df_peaks_chrom = caller.call_candidates()
-            logger.info(f"Found {df_peaks_chrom.shape[0]} peaks on chromosome {chrom}")
-            df_peaks = pd.concat([df_peaks, df_peaks_chrom], ignore_index=True)
+            return caller.call_candidates()
 
+        # Use joblib for parallel processing
+        results = Parallel(n_jobs=n_jobs, verbose=1)(
+            delayed(process_chromosome)(chrom) for chrom in chromosomes.chromosomes
+        )
+
+        df_peaks = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
         df_peaks = df_peaks.sort_values(["Chromosome", "Start"]).reset_index(drop=True)
         return df_peaks

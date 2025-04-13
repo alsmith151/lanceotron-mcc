@@ -78,3 +78,18 @@ class ChromosomeStats(pydantic.BaseModel):
     length: int
     mean: float
     std: float
+
+
+
+def get_device(use_gpu: bool) -> str:
+    """
+    Get the device type (CPU or GPU) based on the environment variable.
+    """
+    import torch
+    device = "cpu"
+    if use_gpu and torch.cuda.is_available():
+        device = "cuda"
+    elif use_gpu and torch.backends.mps.is_available():
+        device = "mps"
+    
+    return device

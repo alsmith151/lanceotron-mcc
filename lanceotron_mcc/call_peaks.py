@@ -7,6 +7,7 @@ from loguru import logger
 from typing_extensions import Annotated
 
 from lanceotron_mcc.api import candidates, signal, utils
+from lanceotron_mcc.api.utils import get_device
 
 app = App()
 
@@ -25,28 +26,22 @@ def call_peaks(
     min_read_count: int = 5,
     coverage_depth_per_single_read: Union[float, Literal['estimate']] = 'estimate',
     background_global_min: Union[float, Literal["mean"]] = "mean",
+    use_gpu: bool = True,
+    n_jobs: int = None
 ):
     """
-    Call peaks from a bigwig file.
+    Call peaks from a bigwig file with GPU and parallel processing support.
 
     Args:
-        bigwig: Path to the bigwig file.
-        outfile: Path to the output file.
-        n_background_chromosomes: Number of background chromosomes to use for estimating the background.
-        cis_chromosome: User supplied name of the cis chromosome for the viewpoint. If 'estimate', the chromosome with the most reads is used.
-        threshold_initial: Initial threshold to use for peak calling.
-        threshold_lst: List of thresholds to use for peak calling.
-        threshold_background_lst: List of thresholds to use for background estimation.
-        window_sizes: List of window sizes to use for peak calling.
-        min_peak_size: Minimum size of a peak.
-        max_peak_size: Maximum size of a peak.
-        min_read_count: Minimum number of reads in a peak.
-        coverage_depth_per_single_read: Coverage depth per single read.
-        background_global_min: Global minimum to use for background estimation.
-
+        ...
+        use_gpu: Whether to use GPU acceleration if available
+        n_jobs: Number of parallel processes to use (default: all CPU cores)
     """
+    import torch
 
-    logger.info(f"Reading bigwig file: {bigwig}")
+    device = get_device(use_gpu=use_gpu)
+    logger.info(f"Reading bigwig file: {bigwig} and using device: {device}")
+    
     params = candidates.CandidatePeakCallParams(
         threshold_initial=threshold_initial,
         threshold_lst=threshold_lst,
@@ -63,11 +58,13 @@ def call_peaks(
         bigwig=bigwig,
         params=params,
         cis_chromosome=cis_chromosome,
+        device=device,
     )
 
-    logger.info("Calling candidate peaks....")
+    logger.info(f"Calling candidate peaks with {n_jobs} parallel workers...")
     peaks = peak_caller.call_candidate_peaks(
-        n_background=n_background_chromosomes
+        n_background=n_background_chromosomes,
+        n_jobs=n_jobs,
     )
 
     logger.info(f'Total number of peaks identified: {peaks.shape[0]}')
