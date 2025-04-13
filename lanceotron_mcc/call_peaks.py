@@ -51,6 +51,7 @@ def call_mcc_peaks(
         use_gpu: Whether to use GPU acceleration if available
         n_jobs: Number of parallel processes to use (default: all CPU cores)
         mcc_filter_background: Whether to filter background regions (default: True)
+        mcc_filter_enriched_regions: Whether to filter enriched regions. Uses 3 * IQR by default (default: True)
     """
     import torch
 
