@@ -27,7 +27,7 @@ def call_mcc_peaks(
     coverage_depth_per_single_read: Union[float, Literal['estimate']] = 'estimate',
     background_global_min: Union[float, Literal["mean"]] = "mean",
     use_gpu: bool = True,
-    n_jobs: Optional[int] = None,
+    n_jobs: Optional[int] = 2,
     mcc_filter_background: bool = True,
     mcc_filter_enriched_regions: bool = True,   
 ):
@@ -75,6 +75,7 @@ def call_mcc_peaks(
         n_background=n_background_chromosomes,
         cis_chromosome=cis_chromosome,
         apply_background_filter=mcc_filter_background,
+        apply_signal_filter=mcc_filter_enriched_regions,
         device=device,
 
     )
