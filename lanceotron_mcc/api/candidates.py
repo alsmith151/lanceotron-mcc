@@ -412,7 +412,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         cis_chromosome: Optional[str | Literal["estimate"]] = None,
         n_background: int = 1,
         apply_background_filter: bool = True,
-        apply_z_score_filter: bool = True,
+        apply_signal_filter: bool = True,
         device: str = None,
     ):
         super().__init__(bigwig, params, device=device)
@@ -423,7 +423,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         
         self.n_background = n_background # Number of background chromosomes to use for filtering
         self.apply_background_filter = apply_background_filter
-        self.apply_z_score_filter = apply_z_score_filter    
+        self.apply_signal_filter = apply_signal_filter    
     
     def estimate_cis_chromosome(self):
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
@@ -492,7 +492,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         return chromosomes
     
 
-    def background_filter(self, peaks: pd.DataFrame, threshold: float = 0.95):
+    def background_filter(self, peaks: pd.DataFrame, threshold: float = 0.95) -> pd.DataFrame:
         """
         Apply background filter to the peaks DataFrame.
         Args:
@@ -510,26 +510,56 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         return peaks
     
 
-    # def z_score_filter(self, peaks: pd.DataFrame, threshold: float = 3.0):
-    #     """
-    #     Apply z-score filter to the peaks DataFrame.
-    #     Args:
-    #         peaks: DataFrame containing the peaks
-    #         threshold: Threshold for filtering peaks based on z-score. Default is 3.0.
-    #     """
-    #     from lanceotron_mcc.api.signal import add_signal
+    def z_score_filter(self, peaks: pd.DataFrame, threshold: float = 3.0):
+        """
+        Apply z-score filter to the peaks DataFrame.
+        Args:
+            peaks: DataFrame containing the peaks
+            threshold: Threshold for filtering peaks based on z-score. Default is 3.0.
+        """
+        from lanceotron_mcc.api.signal import add_signal
 
-    #     peaks = add_signal(peaks, self.bigwig).df
-    #     mean = peaks.query("is_background")["Signal"].mean()
-    #     std = peaks.query("is_background")["Signal"].std()
-    #     z_score = (peaks["Signal"] - mean) / std
-    #     peaks = peaks.assign(z_score=z_score)
+        peaks = add_signal(peaks, self.bigwig).df
+        mean = peaks.query("is_background")["Signal"].mean()
+        std = peaks.query("is_background")["Signal"].std()
+        z_score = (peaks["Signal"] - mean) / std
+        peaks = peaks.assign(z_score=z_score)
 
-    #     logger.info(f"Z-score threshold: {threshold}")
+        logger.info(f"Z-score threshold: {threshold}")
 
-    #     peaks = peaks.query("z_score >= @threshold and is_background == False")
-    #     logger.info(f"Number of peaks after Z-score filtering: {peaks.shape[0]}")
-    #     return peaks
+        peaks = peaks.query("z_score >= @threshold and is_background == False")
+        logger.info(f"Number of peaks after Z-score filtering: {peaks.shape[0]}")
+        return peaks
+    
+    def iqr_filter(self, peaks: pd.DataFrame, threshold: float = 3) -> pd.DataFrame:
+        """
+        Apply IQR filter to the peaks DataFrame.
+        Args:
+            peaks: DataFrame containing the peaks
+            threshold: Threshold for filtering peaks based on IQR. Default is 3.0.
+        """
+        from lanceotron_mcc.api.signal import add_signal
+        peaks = add_signal(peaks, self.bigwig).df
+        peaks = peaks.assign(signal_log1p=lambda df: np.log1p(df.Signal))
+        
+        
+        # Calculate quartiles and IQR
+        signal = peaks['signal_log1p'].values
+        q1 = np.percentile(signal, 25)
+        q3 = np.percentile(signal, 75)
+        iqr = q3 - q1
+
+        # Calculate threshold
+        threshold = q3 + (threshold * iqr)
+
+        # Binarize the data
+        binary_data = (signal > threshold).astype(int)
+
+        peaks = peaks.assign(binary_signal=binary_data)
+        logger.info(f"IQR threshold: {threshold}")
+        peaks = peaks.query("binary_signal == 1 and is_background == False")
+        logger.info(f"Number of peaks after IQR filtering: {peaks.shape[0]}")
+        return peaks
 
 
 
@@ -577,9 +607,8 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         if self.apply_background_filter:
             df_peaks = self.background_filter(df_peaks, threshold=0.95)
 
-        # if self.apply_z_score_filter:
-        #     df_peaks = self.z_score_filter(df_peaks, threshold=1.96)
-        
+        if self.apply_signal_filter:
+            df_peaks = self.z_score_filter(df_peaks, threshold=3.0)
 
         logger.info(f"Number of peaks after filtering: {df_peaks.shape[0]}")
 
