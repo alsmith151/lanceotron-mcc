@@ -412,6 +412,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         cis_chromosome: Optional[str | Literal["estimate"]] = None,
         n_background: int = 1,
         apply_background_filter: bool = True,
+        apply_z_score_filter: bool = True,
         device: str = None,
     ):
         super().__init__(bigwig, params, device=device)
@@ -422,6 +423,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         
         self.n_background = n_background # Number of background chromosomes to use for filtering
         self.apply_background_filter = apply_background_filter
+        self.apply_z_score_filter = apply_z_score_filter    
     
     def estimate_cis_chromosome(self):
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
@@ -504,8 +506,32 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         threshold = peaks.query("is_background")["Signal"].quantile(threshold)
         logger.info(f"Background threshold: {threshold}")
         peaks = peaks.query("Signal >= @threshold and is_background == False")
-        
+        logger.info(f"Number of peaks after filtering: {peaks.shape[0]}")
         return peaks
+    
+
+    # def z_score_filter(self, peaks: pd.DataFrame, threshold: float = 3.0):
+    #     """
+    #     Apply z-score filter to the peaks DataFrame.
+    #     Args:
+    #         peaks: DataFrame containing the peaks
+    #         threshold: Threshold for filtering peaks based on z-score. Default is 3.0.
+    #     """
+    #     from lanceotron_mcc.api.signal import add_signal
+
+    #     peaks = add_signal(peaks, self.bigwig).df
+    #     mean = peaks.query("is_background")["Signal"].mean()
+    #     std = peaks.query("is_background")["Signal"].std()
+    #     z_score = (peaks["Signal"] - mean) / std
+    #     peaks = peaks.assign(z_score=z_score)
+
+    #     logger.info(f"Z-score threshold: {threshold}")
+
+    #     peaks = peaks.query("z_score >= @threshold and is_background == False")
+    #     logger.info(f"Number of peaks after Z-score filtering: {peaks.shape[0]}")
+    #     return peaks
+
+
 
     def call_candidate_peaks(self, n_jobs: int = None, apply_background_filter: bool = True):
         """
@@ -550,6 +576,9 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
 
         if self.apply_background_filter:
             df_peaks = self.background_filter(df_peaks, threshold=0.95)
+
+        # if self.apply_z_score_filter:
+        #     df_peaks = self.z_score_filter(df_peaks, threshold=1.96)
         
 
         logger.info(f"Number of peaks after filtering: {df_peaks.shape[0]}")

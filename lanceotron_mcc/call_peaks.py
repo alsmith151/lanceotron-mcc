@@ -29,6 +29,7 @@ def call_mcc_peaks(
     use_gpu: bool = True,
     n_jobs: Optional[int] = None,
     mcc_filter_background: bool = True,
+    mcc_filter_enriched_regions: bool = True,   
 ):
     """
     Call peaks from a bigwig file with GPU and parallel processing support.
