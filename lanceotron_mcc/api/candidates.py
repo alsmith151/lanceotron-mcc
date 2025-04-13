@@ -501,6 +501,8 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         """
         from lanceotron_mcc.api.signal import add_signal
 
+        logger.info(f"Applying background filter - removing peaks with signal below {threshold * 100} percentile of background signal") 
+
         peaks = add_signal(peaks, self.bigwig).df
         peaks = peaks.assign(is_background=lambda df: np.where(df.Chromosome != self.cis_chromosome, True, False))
         threshold = peaks.query("is_background")["Signal"].quantile(threshold)
@@ -539,6 +541,10 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             threshold: Threshold for filtering peaks based on IQR. Default is 3.0.
         """
         from lanceotron_mcc.api.signal import add_signal
+
+        logger.info(f"Applying IQR filter - removing peaks with signal below {threshold} IQR")
+        logger.info(f"Calculating IQR threshold: {threshold} * IQR")
+
         peaks = add_signal(peaks, self.bigwig).df
         peaks = peaks.assign(signal_log1p=lambda df: np.log1p(df.Signal))
         
@@ -604,13 +610,13 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             End=lambda df: df.End.astype(int),
         )
 
+        logger.info(f"Total number of peaks identified: {df_peaks.shape[0]}")
+
         if self.apply_background_filter:
             df_peaks = self.background_filter(df_peaks, threshold=0.95)
 
         if self.apply_signal_filter:
-            df_peaks = self.z_score_filter(df_peaks, threshold=3.0)
-
-        logger.info(f"Number of peaks after filtering: {df_peaks.shape[0]}")
+            df_peaks = self.iqr_filter(df_peaks, threshold=3.0)
 
         return df_peaks
     
