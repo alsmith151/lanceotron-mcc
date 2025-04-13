@@ -1,21 +1,27 @@
-import numpy as np
-import pyBigWig
-import pandas as pd
-import pydantic
-import torch
-from typing import List, Optional, Tuple, Union, Literal, Dict
-import itertools
-import pathlib
-from loguru import logger
-import pyranges as pr
-import tqdm
-import torch.multiprocessing as mp
-from joblib import Parallel, delayed
 import concurrent.futures
+import itertools
+import multiprocessing
+import pathlib
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
-from .signal import average_array, find_enriched_regions
-from .utils import Chromosomes, ChromosomeStats, get_device
+import numpy as np
+import pandas as pd
+import pyBigWig
+import pydantic
+import pyranges as pr
+import torch
+import torch.multiprocessing as mp
+import tqdm
+from joblib import Parallel, delayed
+from loguru import logger
 
+from lanceotron_mcc.api.signal import average_array, find_enriched_regions
+from lanceotron_mcc.api.utils import Chromosomes, ChromosomeStats, get_device
+
+# Set the start method for multiprocessing to 'spawn' instead of 'fork'
+# This prevents the fork-related deadlock warning
+if multiprocessing.get_start_method(allow_none=True) != 'spawn':
+    multiprocessing.set_start_method('spawn', force=True)
 
 class EnrichedRegionsParams(pydantic.BaseModel):
     background_list: List[int] = [int(1e4), int(1e5), int(1e6)]
@@ -36,7 +42,7 @@ class EnrichedRegionsResult(pydantic.BaseModel):
         arbitrary_types_allowed = True
 
     def to_dataframe(self):
-        df = pd.DataFrame(self.enriched_regions, columns=["Start", "End"])
+        df = pd.DataFrame(self.enriched_regions.cpu(), columns=["Start", "End"])
         return df
 
 
@@ -404,6 +410,8 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         bigwig: Union[pathlib.Path, str],
         params: CandidatePeakCallParams = None,
         cis_chromosome: Optional[str | Literal["estimate"]] = None,
+        n_background: int = 1,
+        apply_background_filter: bool = True,
         device: str = None,
     ):
         super().__init__(bigwig, params, device=device)
@@ -411,22 +419,113 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             self.cis_chromosome = self.estimate_cis_chromosome()
         else:
             self.cis_chromosome = cis_chromosome
+        
+        self.n_background = n_background # Number of background chromosomes to use for filtering
+        self.apply_background_filter = apply_background_filter
+    
+    def estimate_cis_chromosome(self):
+        chromosomes = Chromosomes.from_bigwig(self.bigwig)
+        chromosomes = chromosomes.standard_chromosomes.chromosomes
+        chromosomes_stats = {
+            chrom: self.calculate_chromosome_stats(chrom).model_dump()
+            for chrom in chromosomes
+        }
+        chromosomes_stats = pd.DataFrame(chromosomes_stats).T
+        chromosomes_stats["coverage"] = (
+            chromosomes_stats["length"] * chromosomes_stats["mean"]
+        )
+        chromosomes_stats["coverage_fraction"] = (
+            chromosomes_stats["coverage"] / self.total_coverage
+        )
+        chromosomes_stats["coverage_fraction"] = (
+            chromosomes_stats["coverage_fraction"]
+            / chromosomes_stats["coverage_fraction"].sum()
+        )
+        chromosomes_stats = chromosomes_stats.sort_values(
+            "coverage_fraction", ascending=False
+        )
+        return chromosomes_stats.index[0]
 
-    def call_candidate_peaks(self, n_background: int = 1, n_jobs: int = None):
+    def set_cis_chromosome(self, chromosome: Optional[str] = None):
+        if chromosome is None:
+            self.cis_chromosome = self.estimate_cis_chromosome()
+        else:
+            self.cis_chromosome = chromosome
+    
+    def select_chromosomes(self):
+        """
+        Select chromosomes for background and cis-chromosome.
+        """
+        chromosomes = Chromosomes.from_bigwig(self.bigwig)
+        if self.only_standard_chromosomes:
+            chromosomes = chromosomes.standard_chromosomes.chromosomes
+
+        # Select the cis-chromosome
+        selected_chromosomes = [self.cis_chromosome]
+
+        # Select random background chromosomes if requested
+        if self.n_background > 0:
+            # Filter out the cis chromosome from potential background chromosomes
+            background_choices = [c for c in chromosomes if c != self.cis_chromosome]
+            
+            if len(background_choices) > 0:
+                # Determine how many chromosomes to select (don't select more than available)
+                n_to_select = min(self.n_background, len(background_choices))
+                
+                # Select random background chromosomes
+                background_chromosomes = [str(chrom) for chrom in np.random.choice(
+                    np.array(background_choices), n_to_select, replace=False
+                )]
+                selected_chromosomes.extend(background_chromosomes)
+                
+                logger.info(f"Selected {len(background_chromosomes)} background chromosomes: {background_chromosomes}")
+            else:
+                logger.warning("No chromosomes available for background selection")
+        else:
+            logger.info("No background chromosomes requested (n_background=0)")
+
+        chromosomes = Chromosomes(selected_chromosomes)
+        logger.info(f"Selected cis-chromosome: {self.cis_chromosome}")
+        logger.info(f"Total number of chromosomes selected: {len(chromosomes)}")
+        return chromosomes
+    
+
+    def background_filter(self, peaks: pd.DataFrame, threshold: float = 0.95):
+        """
+        Apply background filter to the peaks DataFrame.
+        Args:
+            peaks: DataFrame containing the peaks
+            threshold: Threshold for filtering peaks based on background signal. Default is 0.95 i.e. 95th percentile of background signal.
+        """
+        from lanceotron_mcc.api.signal import add_signal
+
+        peaks = add_signal(peaks, self.bigwig).df
+        peaks = peaks.assign(is_background=lambda df: np.where(df.Chromosome != self.cis_chromosome, True, False))
+        threshold = peaks.query("is_background")["Signal"].quantile(threshold)
+        logger.info(f"Background threshold: {threshold}")
+        peaks = peaks.query("Signal >= @threshold and is_background == False")
+        
+        return peaks
+
+    def call_candidate_peaks(self, n_jobs: int = None, apply_background_filter: bool = True):
         """
         Call peaks from a bigwig file with parallel processing.
         
         Args:
             n_background: Number of background chromosomes to use
             n_jobs: Number of parallel jobs (defaults to CPU count)
+            apply_background_filter: Whether to remove peaks as their signal intensity is below the background threshold.
         """
         if n_jobs is None:
             n_jobs = mp.cpu_count()
-            
-        chromosomes = self.select_chromosomes(n_background)
+
+
+        # Select chromosomes for background and cis-chromosome
+        chromosomes = self.select_chromosomes()
         logger.info(f'Calling candidate peaks for chromosomes: {chromosomes.chromosomes} using {n_jobs} workers')
 
         def process_chromosome(chrom):
+            logger.info(f"Processing chromosome {chrom}")
             chromosome_stats = self.calculate_chromosome_stats(chrom)
             coverage_array = self.extract_chromosome_signal(
                 chromosome_stats, tensor=True
@@ -444,5 +543,16 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         )
 
         df_peaks = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
-        df_peaks = df_peaks.sort_values(["Chromosome", "Start"]).reset_index(drop=True)
+        df_peaks = df_peaks.sort_values(["Chromosome", "Start"]).reset_index(drop=True).assign(
+            Start=lambda df: df.Start.astype(int),
+            End=lambda df: df.End.astype(int),
+        )
+
+        if self.apply_background_filter:
+            df_peaks = self.background_filter(df_peaks, threshold=0.95)
+        
+
+        logger.info(f"Number of peaks after filtering: {df_peaks.shape[0]}")
+
         return df_peaks
+    

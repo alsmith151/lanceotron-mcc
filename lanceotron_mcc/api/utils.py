@@ -17,6 +17,9 @@ class Chromosomes:
     def __repr__(self):
         return f"Chromosomes({self.chromosomes})"
 
+    def __len__(self):
+        return len(self.chromosomes)
+
     @property
     def standard_chromosomes(self):
         include = r"(chr)?([1-9]+|X|Y)$"

@@ -60,77 +60,122 @@ def _filter_enriched_regions(
     min: int = 0, 
     max: int = int(1e6),
 ) -> torch.Tensor:
-    filtered_regions = torch.empty((0, 2), dtype=torch.float32)
-    for i in range(regions.shape[0]):
-        start = regions[i, 0]
-        end = regions[i, 1]
-        if end - start >= min and end - start <= max:
-            filtered_regions = torch.cat((filtered_regions, regions[i].unsqueeze(0)))
-
+    """Filter regions by size.
+    
+    This function ensures all operations happen on the same device.
+    """
+    if regions.shape[0] == 0:
+        return regions
+        
+    # Ensure we're working with the right device throughout
+    device = regions.device
+    filtered_regions = torch.empty((0, 2), dtype=regions.dtype, device=device)
+    
+    # Calculate region sizes first
+    sizes = regions[:, 1] - regions[:, 0]
+    
+    # Create mask for regions that meet size criteria
+    valid_mask = (sizes >= min) & (sizes <= max)
+    
+    # Use masked selection to get valid regions
+    filtered_regions = regions[valid_mask]
+    
     return filtered_regions
-
 
 def find_enriched_regions(
     array: torch.Tensor,
     threshold: torch.Tensor,
     min_region_size: int = 0,
-    max_region_size: int = float("inf"),
+    max_region_size: Optional[int] = None,
 ):
-    # Ensure inputs are PyTorch tensors
+    """Find regions in the array where values exceed the threshold.
+    
+    This function is optimized to handle device compatibility issues,
+    particularly with Apple MPS devices.
+    """
+    # Check if input is MPS device - in which case we'll process on CPU to avoid known issues
+    is_mps = array.device.type == 'mps'
+    original_device = array.device
+    
+    # Use CPU for processing with MPS devices since certain operations aren't well supported
+    processing_device = torch.device('cpu') if is_mps else original_device
+    
+    # Ensure inputs are PyTorch tensors on the processing device
     if not isinstance(array, torch.Tensor):
-        array = torch.tensor(array)
+        array = torch.tensor(array, device=processing_device)
+    else:
+        array = array.to(processing_device)
+        
     if not isinstance(threshold, torch.Tensor):
-        threshold = torch.tensor(threshold)
+        threshold = torch.tensor(threshold, device=processing_device)
+    else:
+        threshold = threshold.to(processing_device)
 
     # Create a boolean tensor where values are True if they are greater than 0 and above the threshold
     truth_array = (array > 0) & (array >= threshold)
-
+    
     # Check if there are any True values in the truth array
     if truth_array.any():
         # Find the indices where the value changes from True to False or vice versa
         coord_array = torch.where(truth_array[:-1] != truth_array[1:])[0]
-
+            
         # If there are any changes in the truth array
         if coord_array.numel() > 0:
             # Shift indices by 1 to mark the start of new regions
             coord_array = coord_array + 1
-
+            
             # Handle the case where the first value is part of an enriched region
             if coord_array.numel() % 2 == 0:
                 if truth_array[0]:
-                    coord_array = torch.cat([torch.tensor([0]), coord_array])
-                    coord_array = torch.cat([coord_array, torch.tensor([len(array)])])
+                    # Create tensors on the processing device
+                    zero_tensor = torch.tensor([0], device=processing_device)
+                    len_array_tensor = torch.tensor([len(array)], device=processing_device)
+                    coord_array = torch.cat([zero_tensor, coord_array])
+                    coord_array = torch.cat([coord_array, len_array_tensor])
             else:
                 if truth_array[0]:
-                    coord_array = torch.cat([torch.tensor([0]), coord_array])
+                    zero_tensor = torch.tensor([0], device=processing_device)
+                    coord_array = torch.cat([zero_tensor, coord_array])
                 else:
-                    coord_array = torch.cat([coord_array, torch.tensor([len(array)])])
-
+                    len_array_tensor = torch.tensor([len(array)], device=processing_device)
+                    coord_array = torch.cat([coord_array, len_array_tensor])
+            
             # Reshape the coordinate array to pairs of start and end indices of enriched regions
             coord_array = coord_array.reshape(-1, 2)
-
+            
             # Convert the coordinate array to a list of enriched regions
-            enriched_regions = coord_array
+            enriched_regions = coord_array.to(torch.float32)
         else:
             # Handle the case where the entire array is an enriched region
             if truth_array[0]:
-                enriched_regions = torch.float32([0, len(array)])
+                enriched_regions = torch.tensor([[0, len(array)]], dtype=torch.float32, device=processing_device)
+            else:
+                enriched_regions = torch.empty((0, 2), dtype=torch.float32, device=processing_device)
     else:
-        enriched_regions = torch.empty((0, 2), dtype=torch.float32)
-
+        enriched_regions = torch.empty((0, 2), dtype=torch.float32, device=processing_device)
+    
     # If max_region_size is not specified, set it to the length of the array
     if max_region_size is None:
         max_region_size = len(array)
-
-    filtered_region_list = _filter_enriched_regions(
-        enriched_regions, min_region_size, max_region_size
-    )
-    return filtered_region_list
-
+    
+    # Filter regions by size - ensuring we're still on the processing device
+    filtered_regions = torch.empty((0, 2), dtype=torch.float32, device=processing_device)
+    
+    for i in range(enriched_regions.shape[0]):
+        start = enriched_regions[i, 0]
+        end = enriched_regions[i, 1]
+        if end - start >= min_region_size and end - start <= max_region_size:
+            row = enriched_regions[i].unsqueeze(0)
+            filtered_regions = torch.cat((filtered_regions, row))
+            
+    # Move back to the original device
+    if filtered_regions.device != original_device:
+        filtered_regions = filtered_regions.to(original_device)
+            
+    return filtered_regions
 
 def add_signal(
-    peaks: Union[pr.PyRanges, pd.DataFrame], bigwig: Union[pathlib.Path, str]
-) -> pr.PyRanges:
+    peaks: Union[pr.PyRanges, pd.DataFrame], bigwig: Union[pathlib.Path, str]) -> pr.PyRanges:
     if isinstance(bigwig, pathlib.Path):
         bigwig = str(bigwig)
 
