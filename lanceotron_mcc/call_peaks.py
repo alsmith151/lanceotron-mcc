@@ -81,9 +81,7 @@ def call_mcc_peaks(
 
     )
 
-    logger.info(f"Calling candidate peaks with {n_jobs} parallel workers...")
     peaks = peak_caller.call_candidate_peaks(
-        n_jobs=n_jobs,
     )
 
     logger.info(f'Total number of peaks identified: {peaks.shape[0]}')
@@ -95,7 +93,6 @@ def call_mcc_peaks(
 
 def main():
     app()
-
 
 
 if __name__ == "__main__":

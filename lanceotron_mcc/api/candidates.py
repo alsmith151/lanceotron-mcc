@@ -114,6 +114,7 @@ def search_enriched_regions_param_grid(
                 max_region_size=params.max_region_size,
             )
             batch_regions.append(regions)
+    
         
         # Update threshold_array based on found regions
         for regions in batch_regions:
@@ -567,26 +568,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         logger.info(f"Number of peaks after IQR filtering: {peaks.shape[0]}")
         return peaks
 
-
-
-    def call_candidate_peaks(self, n_jobs: int = None, apply_background_filter: bool = True):
-        """
-        Call peaks from a bigwig file with parallel processing.
-        
-        Args:
-            n_background: Number of background chromosomes to use
-            n_jobs: Number of parallel jobs (defaults to CPU count)
-            apply_background_filter: Whether to remove peaks as their signal intensity is below the background threshold.
-        """
-        if n_jobs is None:
-            n_jobs = mp.cpu_count()
-
-
-        # Select chromosomes for background and cis-chromosome
-        chromosomes = self.select_chromosomes()
-        logger.info(f'Calling candidate peaks for chromosomes: {chromosomes.chromosomes} using {n_jobs} workers')
-
-        def process_chromosome(chrom):
+    def _process_chromosome(self, chrom):
             logger.info(f"Processing chromosome {chrom}")
             chromosome_stats = self.calculate_chromosome_stats(chrom)
             coverage_array = self.extract_chromosome_signal(
@@ -599,10 +581,26 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             )
             return caller.call_candidates()
 
-        # Use joblib for parallel processing
-        results = Parallel(n_jobs=n_jobs, verbose=1)(
-            delayed(process_chromosome)(chrom) for chrom in chromosomes.chromosomes
-        )
+
+    def call_candidate_peaks(self):
+        """
+        Call peaks from a bigwig file with parallel processing.
+        
+        Args:
+            n_background: Number of background chromosomes to use
+            apply_background_filter: Whether to remove peaks as their signal intensity is below the background threshold.
+        """
+
+        # Select chromosomes for background and cis-chromosome
+        chromosomes = self.select_chromosomes()
+
+
+        ## Sequential processing to save memory. It's also quick on a GPU.
+        results = []
+        for chrom in chromosomes.chromosomes:
+            result = self._process_chromosome(chrom)
+            results.append(result)
+
 
         df_peaks = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
         df_peaks = df_peaks.sort_values(["Chromosome", "Start"]).reset_index(drop=True).assign(
