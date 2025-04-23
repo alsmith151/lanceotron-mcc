@@ -5,7 +5,7 @@ polars<1.9
 pyBigWig<=0.3.18
 pydantic>2,<=2.11.3
 pyranges
-torch<=2.5
+torch<=2.6
 tqdm
 typer
 cyclopts
