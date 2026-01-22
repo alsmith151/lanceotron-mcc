@@ -150,6 +150,84 @@ def search_enriched_regions_param_grid(
         return EnrichedRegionsResult(enriched_regions=enriched_regions_final)
 
 
+class PeakSet:
+    """A lightweight abstraction for a set of candidate peaks."""
+
+    def __init__(self, df: pd.DataFrame, bigwig: str, cis_chromosome: str):
+        self.df = df
+        self.bigwig = bigwig
+        self.cis_chromosome = cis_chromosome
+
+    @property
+    def empty(self) -> bool:
+        return self.df.empty
+
+    @property
+    def count(self) -> int:
+        return len(self.df)
+
+    def sort(self):
+        self.df = self.df.sort_values(["Chromosome", "Start"]).reset_index(drop=True)
+        return self
+
+    def add_signal(self):
+        from lanceotron_mcc.api.signal import add_signal
+
+        self.df = add_signal(self.df, self.bigwig).df
+        self.df["is_background"] = self.df.Chromosome != self.cis_chromosome
+        return self
+
+    def filter_background(self, percentile: float = 0.95):
+        if self.empty or "Signal" not in self.df.columns:
+            return self
+
+        bg_peaks = self.df[self.df["is_background"]]
+        if bg_peaks.empty:
+            logger.warning("No background peaks found for filtering.")
+            return self
+
+        threshold = bg_peaks["Signal"].quantile(percentile)
+        logger.info(f"Applying background filter: threshold={threshold:.4f}")
+
+        # Keep cis peaks above threshold
+        self.df = self.df[
+            (self.df["Signal"] >= threshold) & (~self.df["is_background"])
+        ]
+        return self
+
+    def filter_iqr(self, multiplier: float = 3.0):
+        if self.empty or "Signal" not in self.df.columns:
+            return self
+
+        logger.info(f"Applying IQR filter: multiplier={multiplier}")
+        self.df["signal_log1p"] = np.log1p(self.df["Signal"])
+        vals = self.df["signal_log1p"].values
+
+        if len(vals) > 0:
+            q1, q3 = np.percentile(vals, [25, 75])
+            iqr = q3 - q1
+            threshold = q3 + (multiplier * iqr)
+            logger.info(f"IQR threshold: {threshold:.4f}")
+            self.df = self.df[self.df["signal_log1p"] > threshold]
+
+        return self
+
+    def finalize(self) -> pd.DataFrame:
+        """Return the final filtered DataFrame on the cis chromosome."""
+        if self.empty:
+            return pd.DataFrame(columns=["Chromosome", "Start", "End", "Signal"])
+
+        columns_to_keep = ["Chromosome", "Start", "End"]
+        if "Signal" in self.df.columns:
+            columns_to_keep.append("Signal")
+
+        return (
+            self.df.query("Chromosome == @self.cis_chromosome")[columns_to_keep]
+            .sort_values(["Start"])
+            .reset_index(drop=True)
+        )
+
+
 class CandidatePeakCallParams(pydantic.BaseModel):
     threshold_initial: float = 9.0
     threshold_lst: List[float] = [2.0, 4.0, 6.0]
@@ -173,28 +251,22 @@ class ChromosomePeakCaller:
         self.coverage_array = coverage_array
         self.params = params
 
-    def call_candidates(self):
-        # Set threshold values
-        threshold_limit = (
-            len(self.params.threshold_background_lst)
-            * len(self.params.window_sizes)
-            * len(self.params.threshold_lst)
-        )
-        threshold_cumulative = self.params.threshold_initial
-
-        # Set background global minimum threshold if specified
+    def _get_background_min(self) -> float:
         if self.params.background_global_min == "mean":
-            background_global_min = self.coverage_array.mean()
-        else:
-            background_global_min = self.params.background_global_min
+            return float(self.coverage_array.mean())
+        return self.params.background_global_min
 
-        enrichment_results = search_enriched_regions_param_grid(
+    def _initial_search(self) -> Tuple[pd.DataFrame, torch.Tensor]:
+        """Perform the initial search for enriched regions using a parameter grid."""
+        background_global_min = self._get_background_min()
+
+        res = search_enriched_regions_param_grid(
             self.coverage_array,
             EnrichedRegionsParams(
                 background_list=self.params.threshold_background_lst,
                 window_list=self.params.window_sizes,
                 threshold_list=self.params.threshold_lst,
-                threshold_cumulative=threshold_cumulative,
+                threshold_cumulative=self.params.threshold_initial,
                 min_region_size=self.params.min_peak_size,
                 max_region_size=self.params.max_peak_size,
                 background_global_min=background_global_min,
@@ -203,110 +275,112 @@ class ChromosomePeakCaller:
             label=self.chromosome,
         )
 
-        # Create a DataFrame of enriched regions
-        df_enriched_regions = pd.DataFrame(
-            enrichment_results.to_dataframe(), columns=["Start", "End"]
-        )
-        df_enriched_regions["Chromosome"] = self.chromosome
-        df_enriched_regions["Length"] = (
-            df_enriched_regions["End"] - df_enriched_regions["Start"]
-        )
+        df = pd.DataFrame(res.to_dataframe(), columns=["Start", "End"])
+        df["Chromosome"] = self.chromosome
+        df["Length"] = df["End"] - df["Start"]
 
-        # Filter out regions with length less than min_peak_size
-        df_enriched_regions = df_enriched_regions.query(
-            f"Length >= {self.params.min_peak_size}"
-        )
+        # Initial filtering by minimum size
+        df = df[df["Length"] >= self.params.min_peak_size]
+        return df, res.threshold_array
 
-        df_unsolved = df_enriched_regions.query("Length > @self.params.max_peak_size")
-        df_solved = df_enriched_regions.query("Length <= @self.params.max_peak_size")
-
-        # Iterative refinement of enriched regions based on a higher threshold and size constraints.
-        # The process continues until the threshold limit is reached or all regions are solved.
-        # The goal of this loop is to iteratively refine the identified unsolved enriched regions
-        # by increasing the cumulative threshold and resolving regions that are too large into smaller, more precise regions.
+    def _refine_unsolved_regions(
+        self,
+        df_unsolved: pd.DataFrame,
+        threshold_array: torch.Tensor,
+        threshold_cumulative: float,
+        threshold_limit: int,
+    ) -> pd.DataFrame:
+        """Iteratively refine regions that are larger than `max_peak_size`."""
+        df_solved_list = []
 
         while not df_unsolved.empty and threshold_cumulative < threshold_limit - 1:
-            # Sort unsolved regions by Start
             df_unsolved = df_unsolved.sort_values(["Chromosome", "Start"]).reset_index(
                 drop=True
             )
             df_unsolved["unsolved_idx"] = df_unsolved.index
-
-            # Increment the cumulative threshold
             threshold_cumulative += 1
 
-            # Recompute enriched regions with the higher threshold
-            enriched_regions_higher_thresh = find_enriched_regions(
-                enrichment_results.threshold_array, threshold_cumulative
+            # Find regions that meet the higher threshold
+            higher_regions = find_enriched_regions(
+                threshold_array, threshold_cumulative
             )
-            df_enriched_higher_thresh = pd.DataFrame(
-                enriched_regions_higher_thresh, columns=["Start", "End"]
-            )
-            df_enriched_higher_thresh.insert(0, "Chromosome", self.chromosome)
+            df_higher = pd.DataFrame(higher_regions, columns=["Start", "End"])
+            df_higher.insert(0, "Chromosome", self.chromosome)
 
-            # Use pyranges to find overlaps between unsolved regions and enriched regions at a higher threshold
+            # Analyze overlaps between current unsolved and higher-threshold regions
             pr_unsolved = pr.PyRanges(df_unsolved)
-            pr_enriched_higher_thresh = pr.PyRanges(df_enriched_higher_thresh)
-            overlap_counts_df = pr.count_overlaps(
-                {
-                    "unsolved": pr_unsolved,
-                    "enriched_higher_thresh": pr_enriched_higher_thresh,
-                }
+            pr_higher = pr.PyRanges(df_higher)
+            overlap_df = pr.count_overlaps(
+                {"unsolved": pr_unsolved, "higher": pr_higher}
             ).as_df()
-            overlap_counts_df["size"] = overlap_counts_df.End - overlap_counts_df.Start
+            overlap_df["size"] = overlap_df.End - overlap_df.Start
 
-            # Identify regions enriched initially but lost at a higher threshold
-            df_single_enriched = overlap_counts_df[
-                (overlap_counts_df["unsolved"] == 1)
-                & (overlap_counts_df["enriched_higher_thresh"] == 0)
+            # 1. Single overlap or lost (Solved): No new peaks emerged at higher threshold
+            df_single = overlap_df[
+                (overlap_df["unsolved"] == 1) & (overlap_df["higher"] == 0)
             ]
-            df_single_enriched = pd.merge(
-                df_single_enriched,
-                df_unsolved,
-                on=["Chromosome", "Start", "End"],
-                how="inner",
-                suffixes=("_single_enriched", "_unsolved"),
-            )
-            df_solved = pd.concat(
-                [df_solved, df_unsolved.loc[df_single_enriched["unsolved_idx"]]],
-                ignore_index=True,
-            )
+            if not df_single.empty:
+                indices = pd.merge(
+                    df_single, df_unsolved, on=["Chromosome", "Start", "End"]
+                )["unsolved_idx"]
+                df_solved_list.append(df_unsolved.loc[indices])
 
-            # Identify regions enriched both initially and at a higher threshold
-            df_double_enriched = overlap_counts_df[
-                (overlap_counts_df["unsolved"] == 1)
-                & (overlap_counts_df["enriched_higher_thresh"] == 1)
+            # 2. Double overlap (Potential splitting or remaining above max size)
+            df_multi = overlap_df[
+                (overlap_df["unsolved"] == 1) & (overlap_df["higher"] == 1)
             ]
-            df_double_enriched = pd.merge_asof(
-                df_double_enriched,
-                df_unsolved,
-                on="Start",
-                by="Chromosome",
-                suffixes=("_double_enriched", "_unsolved"),
-            )
-            df_double_enriched["End"] = df_double_enriched["End_double_enriched"]
-            df_double_enriched["below_max_size"] = (
-                df_double_enriched["size"] < self.params.max_peak_size
-            )
+            if not df_multi.empty:
+                df_multi = pd.merge_asof(
+                    df_multi,
+                    df_unsolved,
+                    on="Start",
+                    by="Chromosome",
+                    suffixes=("_multi", "_unsolved"),
+                )
+                df_multi["End"] = df_multi["End_multi"]
+                is_below = df_multi["size"] < self.params.max_peak_size
 
-            # Add double enriched regions below max size to solved_df
-            df_solved = pd.concat(
-                [df_solved, df_double_enriched[df_double_enriched["below_max_size"]]],
-                ignore_index=True,
-            )
+                # If below max size, it's solved
+                df_solved_list.append(df_multi[is_below])
 
-            # Update unsolved_df with regions above max size
-            df_unsolved = df_double_enriched[~df_double_enriched["below_max_size"]][
-                ["Chromosome", "Start", "End"]
-            ]
+                # If still above max size, it remains unsolved for the next iteration
+                df_unsolved = df_multi[~is_below][["Chromosome", "Start", "End"]]
+            else:
+                df_unsolved = pd.DataFrame(columns=["Chromosome", "Start", "End"])
 
-        # Add any remaining unsolved regions to solved_df
-        df_solved = pd.concat([df_solved, df_unsolved], ignore_index=True)
-        df_solved = df_solved.sort_values(["Chromosome", "Start"]).reset_index(
-            drop=True
+        if not df_unsolved.empty:
+            df_solved_list.append(df_unsolved)
+
+        return (
+            pd.concat(df_solved_list, ignore_index=True)
+            if df_solved_list
+            else df_unsolved
         )
 
-        return df_solved
+    def call_candidates(self) -> pd.DataFrame:
+        """Call candidate peaks using multi-threshold refinement."""
+        threshold_limit = (
+            len(self.params.threshold_background_lst)
+            * len(self.params.window_sizes)
+            * len(self.params.threshold_lst)
+        )
+
+        df_enriched, threshold_array = self._initial_search()
+
+        # Split into solved (correct size) and unsolved (too large)
+        df_unsolved = df_enriched[df_enriched["Length"] > self.params.max_peak_size]
+        df_solved = df_enriched[df_enriched["Length"] <= self.params.max_peak_size]
+
+        if not df_unsolved.empty:
+            df_refined = self._refine_unsolved_regions(
+                df_unsolved,
+                threshold_array,
+                self.params.threshold_initial,
+                threshold_limit,
+            )
+            df_solved = pd.concat([df_solved, df_refined], ignore_index=True)
+
+        return df_solved.sort_values(["Chromosome", "Start"]).reset_index(drop=True)
 
 
 class CandidatePeakCaller:
@@ -616,78 +690,41 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         )
         return caller.call_candidates()
 
-    def call_candidate_peaks(self, n_jobs: int = 1):
-        """
-        Call peaks from a bigwig file with parallel processing.
-
-        Args:
-            n_jobs: Number of parallel processes to use
-        """
-        # Select chromosomes for background and cis-chromosome
-        chromosomes = self.select_chromosomes()
-
+    def _identify_all_candidates(
+        self, chromosomes: List[str], n_jobs: int
+    ) -> pd.DataFrame:
         if n_jobs > 1:
             logger.info(f"Parallelizing peak calling across {n_jobs} workers")
             results = Parallel(n_jobs=n_jobs, verbose=1)(
-                delayed(self._process_chromosome)(chrom)
-                for chrom in chromosomes.chromosomes
+                delayed(self._process_chromosome)(chrom) for chrom in chromosomes
             )
         else:
             logger.info("Sequential processing of chromosomes")
-            results = []
-            for chrom in chromosomes.chromosomes:
-                result = self._process_chromosome(chrom)
-                results.append(result)
+            results = [self._process_chromosome(chrom) for chrom in chromosomes]
 
-        df_peaks = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
-        if not df_peaks.empty:
-            df_peaks = (
-                df_peaks.sort_values(["Chromosome", "Start"])
-                .reset_index(drop=True)
-                .assign(
-                    Start=lambda df: df.Start.astype(int),
-                    End=lambda df: df.End.astype(int),
-                )
-            )
+        return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
 
-            logger.info(f"Total number of peaks identified: {df_peaks.shape[0]}")
+    def call_candidate_peaks(self, n_jobs: int = 1) -> pd.DataFrame:
+        """Call candidate peaks and apply filtering pipeline."""
+        target_chroms = self.select_chromosomes().chromosomes
 
-            # Apply filters. add_signal is called only once inside if needed.
-            from lanceotron_mcc.api.signal import add_signal
+        # 1. Identification phase
+        df_raw = self._identify_all_candidates(target_chroms, n_jobs)
+        if df_raw.empty:
+            return df_raw
 
-            df_peaks = add_signal(df_peaks, self.bigwig).df
-            df_peaks = df_peaks.assign(
-                is_background=lambda df: np.where(
-                    df.Chromosome != self.cis_chromosome, True, False
-                )
-            )
+        # 2. Filtering phase using PeakSet abstraction
+        peaks = PeakSet(df_raw, self.bigwig, self.cis_chromosome)
+        logger.info(f"Total raw candidates identified: {peaks.count}")
 
-            if self.apply_background_filter:
-                # Optimized background filter
-                threshold_val = df_peaks.query("is_background")["Signal"].quantile(0.95)
-                logger.info(f"Background threshold: {threshold_val}")
-                df_peaks = df_peaks.query("Signal >= @threshold_val")
-                logger.info(
-                    f"Number of peaks after background filtering: {df_peaks.shape[0]}"
-                )
+        peaks.sort().add_signal()
 
-            if self.apply_signal_filter:
-                # Optimized IQR filter
-                logger.info("Applying IQR filter")
-                df_peaks = df_peaks.assign(signal_log1p=lambda df: np.log1p(df.Signal))
-                signal_vals = df_peaks["signal_log1p"].values
-                if len(signal_vals) > 0:
-                    q1 = np.percentile(signal_vals, 25)
-                    q3 = np.percentile(signal_vals, 75)
-                    iqr = q3 - q1
-                    iqr_threshold = q3 + (3.0 * iqr)
-                    logger.info(f"IQR threshold: {iqr_threshold}")
-                    df_peaks = df_peaks.query("signal_log1p > @iqr_threshold")
-                logger.info(f"Number of peaks after IQR filtering: {df_peaks.shape[0]}")
+        if self.apply_background_filter:
+            peaks.filter_background()
+            logger.info(f"Candidates after background filtering: {peaks.count}")
 
-            # Final output should only contain cis-chromosome peaks
-            df_peaks = df_peaks.query("is_background == False").drop(
-                columns=["is_background", "signal_log1p"], errors="ignore"
-            )
+        if self.apply_signal_filter:
+            peaks.filter_iqr()
+            logger.info(f"Candidates after IQR filtering: {peaks.count}")
 
-        return df_peaks
+        return peaks.finalize()

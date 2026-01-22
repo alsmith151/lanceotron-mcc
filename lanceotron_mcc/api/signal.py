@@ -348,7 +348,6 @@ def add_signal(
     bw = pybigtools.open(bigwig)
 
     # Optimized extraction using pybigtools
-    signal_results = np.zeros(len(peaks))
 
     # Group by chromosome to minimize opening/seeking
     import tempfile
@@ -356,7 +355,9 @@ def add_signal(
     with tempfile.NamedTemporaryFile(suffix=".bed", mode="w") as tmpbed:
         # Write peaks to temp bed file
         # bed format: Chromosome, Start, End
-        peaks_sorted = peaks.sort_values(["Chromosome", "Start"])
+        peaks_sorted = peaks.copy().sort_values(["Chromosome", "Start"])
+        peaks_sorted["Start"] = peaks_sorted["Start"].astype(int)
+        peaks_sorted["End"] = peaks_sorted["End"].astype(int)
         peaks_sorted[["Chromosome", "Start", "End"]].to_csv(
             tmpbed.name, sep="\t", index=False, header=False
         )
@@ -365,19 +366,23 @@ def add_signal(
         # Returns a generator of means
         try:
             means = list(bw.average_over_bed(tmpbed.name))
-            logger.info(
-                f"Extracted {len(means)} signals. Max signal: {max(means) if means else 0}"
-            )
             # Create a lookup or just assign if we are sure order is same
             # Since we gave it a sorted file, it should return in that order
-            peaks_sorted["Signal"] = means
-
-            # Reorder back to original and update the main 'peaks' dataframe
-            peaks.loc[peaks_sorted.index, "Signal"] = peaks_sorted["Signal"]
+            peaks.loc[peaks_sorted.index, "Signal"] = means
         except Exception as e:
             logger.warning(
                 f"Error using average_over_bed: {e}. Falling back to iterative extraction."
             )
+            # Fallback
+            for chrom, group in peaks.groupby("Chromosome"):
+                for idx, (s, e) in zip(group.index, zip(group["Start"], group["End"])):
+                    vals = bw.values(chrom, int(s), int(e))
+                    peaks.loc[idx, "Signal"] = (
+                        np.mean(vals) if vals is not None else 0.0
+                    )
+
+    if "Signal" not in peaks.columns:
+        peaks["Signal"] = 0.0
     peaks["Signal"] = peaks["Signal"].fillna(0)
 
     return pr.PyRanges(peaks)
