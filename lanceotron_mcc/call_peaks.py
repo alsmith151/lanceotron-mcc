@@ -11,6 +11,7 @@ from lanceotron_mcc.api.utils import get_device
 
 app = App()
 
+
 @app.command()
 def call_mcc_peaks(
     bigwig: pathlib.Path,
@@ -19,17 +20,21 @@ def call_mcc_peaks(
     cis_chromosome: Union[str, Literal["estimate"]] = "estimate",
     threshold_initial: float = 9.0,
     threshold_lst: Annotated[List[float], Parameter(negative=[])] = [2.0, 4.0, 6.0],
-    threshold_background_lst: Annotated[List[int], Parameter(negative=[])] = [int(1e4), int(1e5), int(1e6)],
+    threshold_background_lst: Annotated[List[int], Parameter(negative=[])] = [
+        int(1e4),
+        int(1e5),
+        int(1e6),
+    ],
     window_sizes: Annotated[List[int], Parameter(negative=[])] = [200, 400, 600],
     min_peak_size: int = 50,
     max_peak_size: int = 500,
     min_read_count: int = 5,
-    coverage_depth_per_single_read: Union[float, Literal['estimate']] = 'estimate',
+    coverage_depth_per_single_read: Union[float, Literal["estimate"]] = "estimate",
     background_global_min: Union[float, Literal["mean"]] = "mean",
     use_gpu: bool = True,
     n_jobs: Optional[int] = 2,
     mcc_filter_background: bool = True,
-    mcc_filter_enriched_regions: bool = True,   
+    mcc_filter_enriched_regions: bool = True,
 ):
     """
     Call peaks from a bigwig file with GPU and parallel processing support.
@@ -57,7 +62,7 @@ def call_mcc_peaks(
 
     device = get_device(use_gpu=use_gpu)
     logger.info(f"Reading bigwig file: {bigwig} and using device: {device}")
-    
+
     params = candidates.CandidatePeakCallParams(
         threshold_initial=threshold_initial,
         threshold_lst=threshold_lst,
@@ -78,17 +83,14 @@ def call_mcc_peaks(
         apply_background_filter=mcc_filter_background,
         apply_signal_filter=mcc_filter_enriched_regions,
         device=device,
-
     )
 
-    peaks = peak_caller.call_candidate_peaks(
-    )
+    peaks = peak_caller.call_candidate_peaks(n_jobs=n_jobs)
 
-    logger.info(f'Total number of peaks identified: {peaks.shape[0]}')
+    logger.info(f"Total number of peaks identified: {peaks.shape[0]}")
     logger.info(f"Writing peaks to {outfile}")
     gr_peak_calls = pr.PyRanges(peaks)
     gr_peak_calls.to_bed(outfile, keep=False)
-
 
 
 def main():

@@ -6,7 +6,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import pyBigWig
+import pybigtools
 import pydantic
 import pyranges as pr
 import torch
@@ -20,8 +20,9 @@ from lanceotron_mcc.api.utils import Chromosomes, ChromosomeStats, get_device
 
 # Set the start method for multiprocessing to 'spawn' instead of 'fork'
 # This prevents the fork-related deadlock warning
-if multiprocessing.get_start_method(allow_none=True) != 'spawn':
-    multiprocessing.set_start_method('spawn', force=True)
+if multiprocessing.get_start_method(allow_none=True) != "spawn":
+    multiprocessing.set_start_method("spawn", force=True)
+
 
 class EnrichedRegionsParams(pydantic.BaseModel):
     background_list: List[int] = [int(1e4), int(1e5), int(1e6)]
@@ -85,24 +86,24 @@ def search_enriched_regions_param_grid(
     """
     # Move array to device if it's not already there
     device = array.device
-    
+
     # Initialize threshold array on the same device
     threshold_array = torch.zeros(array.shape, dtype=torch.int8, device=device)
-    
+
     # Generate all parameter combinations
     combinations = list(
         itertools.product(
             params.background_list, params.window_list, params.threshold_list
         )
     )
-    
+
     # Process combinations in batches for better GPU utilization
     batch_size = min(16, len(combinations))  # Adjust batch size as needed
-    
+
     for i in range(0, len(combinations), batch_size):
-        batch = combinations[i:i+batch_size]
+        batch = combinations[i : i + batch_size]
         batch_regions = []
-        
+
         for background, window, threshold in batch:
             regions = search_enriched_regions(
                 array=array,
@@ -114,14 +115,24 @@ def search_enriched_regions_param_grid(
                 max_region_size=params.max_region_size,
             )
             batch_regions.append(regions)
-    
-        
-        # Update threshold_array based on found regions
+
+        # Vectorized update of threshold_array using a difference array
+        # This is much faster than sliced updates in a loop
+        diff = torch.zeros(array.shape[0] + 1, dtype=torch.int32, device=device)
+
         for regions in batch_regions:
-            for i in range(regions.shape[0]):
-                start = int(regions[i, 0].item())
-                end = int(regions[i, 1].item())
-                threshold_array[start:end] += 1
+            if regions.shape[0] > 0:
+                starts = regions[:, 0].to(torch.long)
+                ends = regions[:, 1].to(torch.long)
+
+                # Update difference array
+                # Use scatter_add_ for batch updates if possible,
+                # but direct indexing with multiple indices works in PyTorch
+                diff.index_add_(0, starts, torch.ones_like(starts, dtype=torch.int32))
+                diff.index_add_(0, ends, -torch.ones_like(ends, dtype=torch.int32))
+
+        # Compute cumulative sum to get the threshold counts at each position
+        threshold_array += torch.cumsum(diff, dim=0)[:-1].to(torch.int8)
 
     # Identify final enriched regions based on the cumulative threshold array
     enriched_regions_final = find_enriched_regions(
@@ -317,17 +328,27 @@ class CandidatePeakCaller:
 
     @property
     def total_coverage(self):
-        with pyBigWig.open(self.bigwig) as bw:
-            return bw.header()["sumData"]
+        bw = pybigtools.open(self.bigwig)
+        return bw.info()["summary"]["sum"]
 
     def calculate_chromosome_stats(self, chromosome: str) -> ChromosomeStats:
-        with pyBigWig.open(self.bigwig) as bw:
-            stats = ChromosomeStats(
-                name=chromosome,
-                length=bw.chroms(chromosome),
-                mean=bw.stats(chromosome, type="mean", exact=True)[0],
-                std=bw.stats(chromosome, type="std", exact=True)[0],
-            )
+        bw = pybigtools.open(self.bigwig)
+        length = bw.chroms()[chromosome]
+        # For per-chromosome stats, we need to extract the values
+        vals = bw.values(chromosome, 0, length)
+        if vals is not None:
+            mean_val = np.mean(vals)
+            std_val = np.std(vals)
+        else:
+            mean_val = 0.0
+            std_val = 0.0
+
+        stats = ChromosomeStats(
+            name=chromosome,
+            length=length,
+            mean=float(mean_val),
+            std=float(std_val),
+        )
         return stats
 
     @property
@@ -346,25 +367,25 @@ class CandidatePeakCaller:
     ) -> Union[np.ndarray, torch.Tensor]:
         """
         Extract the signal from a chromosome in the bigwig file with GPU support.
+        Uses pybigtools for faster extraction.
         """
-        chrom_coverage_array = np.zeros(chrom_stats.length, dtype=np.float32)
+        bw = pybigtools.open(self.bigwig)
+        # bw.values() returns a numpy array representing the entire chromosome
+        chrom_coverage_array = bw.values(chrom_stats.name, 0, chrom_stats.length)
 
-        with pyBigWig.open(self.bigwig) as bw:
-            reads_intervals = bw.intervals(chrom_stats.name)
-            if reads_intervals is not None:
-                for start, end, value in reads_intervals:
-                    chrom_coverage_array[start:end] = value
-            else:
-                logger.warning(f"No reads found on chromosome {chrom_stats.name}")
+        if chrom_coverage_array is None:
+            logger.warning(f"No reads found on chromosome {chrom_stats.name}")
+            chrom_coverage_array = np.zeros(chrom_stats.length, dtype=np.float32)
 
         # Convert to torch tensor and move to appropriate device
-        coverage_tensor = torch.tensor(chrom_coverage_array, device=self.device)
+        coverage_tensor = torch.as_tensor(
+            chrom_coverage_array, device=self.device, dtype=torch.float32
+        )
 
         if smoothing is not None:
             coverage_tensor = average_array(coverage_tensor, window=smoothing)
 
         if not tensor:
-            # Move back to CPU if numpy array is requested
             return coverage_tensor.cpu().numpy()
 
         return coverage_tensor
@@ -375,17 +396,19 @@ class CandidatePeakCaller:
         """
         if n_jobs is None:
             n_jobs = mp.cpu_count()
-        
+
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
         if self.only_standard_chromosomes:
             chromosomes = chromosomes.standard_chromosomes.chromosomes
 
         logger.info(f"Parallelizing peak calling across {n_jobs} workers")
-        
+
         def process_chromosome(chrom):
             logger.debug(f"Processing chromosome {chrom}")
             chromosome_stats = self.calculate_chromosome_stats(chrom)
-            coverage_array = self.extract_chromosome_signal(chromosome_stats, tensor=True)
+            coverage_array = self.extract_chromosome_signal(
+                chromosome_stats, tensor=True
+            )
             caller = ChromosomePeakCaller(
                 chromosome=chrom,
                 coverage_array=coverage_array,
@@ -421,11 +444,13 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             self.cis_chromosome = self.estimate_cis_chromosome()
         else:
             self.cis_chromosome = cis_chromosome
-        
-        self.n_background = n_background # Number of background chromosomes to use for filtering
+
+        self.n_background = (
+            n_background  # Number of background chromosomes to use for filtering
+        )
         self.apply_background_filter = apply_background_filter
-        self.apply_signal_filter = apply_signal_filter    
-    
+        self.apply_signal_filter = apply_signal_filter
+
     def estimate_cis_chromosome(self):
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
         chromosomes = chromosomes.standard_chromosomes.chromosomes
@@ -454,7 +479,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             self.cis_chromosome = self.estimate_cis_chromosome()
         else:
             self.cis_chromosome = chromosome
-    
+
     def select_chromosomes(self):
         """
         Select chromosomes for background and cis-chromosome.
@@ -470,18 +495,23 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         if self.n_background > 0:
             # Filter out the cis chromosome from potential background chromosomes
             background_choices = [c for c in chromosomes if c != self.cis_chromosome]
-            
+
             if len(background_choices) > 0:
                 # Determine how many chromosomes to select (don't select more than available)
                 n_to_select = min(self.n_background, len(background_choices))
-                
+
                 # Select random background chromosomes
-                background_chromosomes = [str(chrom) for chrom in np.random.choice(
-                    np.array(background_choices), n_to_select, replace=False
-                )]
+                background_chromosomes = [
+                    str(chrom)
+                    for chrom in np.random.choice(
+                        np.array(background_choices), n_to_select, replace=False
+                    )
+                ]
                 selected_chromosomes.extend(background_chromosomes)
-                
-                logger.info(f"Selected {len(background_chromosomes)} background chromosomes: {background_chromosomes}")
+
+                logger.info(
+                    f"Selected {len(background_chromosomes)} background chromosomes: {background_chromosomes}"
+                )
             else:
                 logger.warning("No chromosomes available for background selection")
         else:
@@ -491,9 +521,10 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         logger.info(f"Selected cis-chromosome: {self.cis_chromosome}")
         logger.info(f"Total number of chromosomes selected: {len(chromosomes)}")
         return chromosomes
-    
 
-    def background_filter(self, peaks: pd.DataFrame, threshold: float = 0.95) -> pd.DataFrame:
+    def background_filter(
+        self, peaks: pd.DataFrame, threshold: float = 0.95
+    ) -> pd.DataFrame:
         """
         Apply background filter to the peaks DataFrame.
         Args:
@@ -502,16 +533,21 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         """
         from lanceotron_mcc.api.signal import add_signal
 
-        logger.info(f"Applying background filter - removing peaks with signal below {threshold * 100} percentile of background signal") 
+        logger.info(
+            f"Applying background filter - removing peaks with signal below {threshold * 100} percentile of background signal"
+        )
 
         peaks = add_signal(peaks, self.bigwig).df
-        peaks = peaks.assign(is_background=lambda df: np.where(df.Chromosome != self.cis_chromosome, True, False))
+        peaks = peaks.assign(
+            is_background=lambda df: np.where(
+                df.Chromosome != self.cis_chromosome, True, False
+            )
+        )
         threshold = peaks.query("is_background")["Signal"].quantile(threshold)
         logger.info(f"Background threshold: {threshold}")
         peaks = peaks.query("Signal >= @threshold and is_background == False")
         logger.info(f"Number of peaks after filtering: {peaks.shape[0]}")
         return peaks
-    
 
     def z_score_filter(self, peaks: pd.DataFrame, threshold: float = 3.0):
         """
@@ -533,7 +569,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         peaks = peaks.query("z_score >= @threshold and is_background == False")
         logger.info(f"Number of peaks after Z-score filtering: {peaks.shape[0]}")
         return peaks
-    
+
     def iqr_filter(self, peaks: pd.DataFrame, threshold: float = 3) -> pd.DataFrame:
         """
         Apply IQR filter to the peaks DataFrame.
@@ -543,15 +579,16 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         """
         from lanceotron_mcc.api.signal import add_signal
 
-        logger.info(f"Applying IQR filter - removing peaks with signal below {threshold} IQR")
+        logger.info(
+            f"Applying IQR filter - removing peaks with signal below {threshold} IQR"
+        )
         logger.info(f"Calculating IQR threshold: {threshold} * IQR")
 
         peaks = add_signal(peaks, self.bigwig).df
         peaks = peaks.assign(signal_log1p=lambda df: np.log1p(df.Signal))
-        
-        
+
         # Calculate quartiles and IQR
-        signal = peaks['signal_log1p'].values
+        signal = peaks["signal_log1p"].values
         q1 = np.percentile(signal, 25)
         q3 = np.percentile(signal, 75)
         iqr = q3 - q1
@@ -569,52 +606,88 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         return peaks
 
     def _process_chromosome(self, chrom):
-            logger.info(f"Processing chromosome {chrom}")
-            chromosome_stats = self.calculate_chromosome_stats(chrom)
-            coverage_array = self.extract_chromosome_signal(
-                chromosome_stats, tensor=True
-            )
-            caller = ChromosomePeakCaller(
-                chromosome=chrom,
-                coverage_array=coverage_array,
-                params=self.params,
-            )
-            return caller.call_candidates()
+        logger.info(f"Processing chromosome {chrom}")
+        chromosome_stats = self.calculate_chromosome_stats(chrom)
+        coverage_array = self.extract_chromosome_signal(chromosome_stats, tensor=True)
+        caller = ChromosomePeakCaller(
+            chromosome=chrom,
+            coverage_array=coverage_array,
+            params=self.params,
+        )
+        return caller.call_candidates()
 
-
-    def call_candidate_peaks(self):
+    def call_candidate_peaks(self, n_jobs: int = 1):
         """
         Call peaks from a bigwig file with parallel processing.
-        
-        Args:
-            n_background: Number of background chromosomes to use
-            apply_background_filter: Whether to remove peaks as their signal intensity is below the background threshold.
-        """
 
+        Args:
+            n_jobs: Number of parallel processes to use
+        """
         # Select chromosomes for background and cis-chromosome
         chromosomes = self.select_chromosomes()
 
-
-        ## Sequential processing to save memory. It's also quick on a GPU.
-        results = []
-        for chrom in chromosomes.chromosomes:
-            result = self._process_chromosome(chrom)
-            results.append(result)
-
+        if n_jobs > 1:
+            logger.info(f"Parallelizing peak calling across {n_jobs} workers")
+            results = Parallel(n_jobs=n_jobs, verbose=1)(
+                delayed(self._process_chromosome)(chrom)
+                for chrom in chromosomes.chromosomes
+            )
+        else:
+            logger.info("Sequential processing of chromosomes")
+            results = []
+            for chrom in chromosomes.chromosomes:
+                result = self._process_chromosome(chrom)
+                results.append(result)
 
         df_peaks = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
-        df_peaks = df_peaks.sort_values(["Chromosome", "Start"]).reset_index(drop=True).assign(
-            Start=lambda df: df.Start.astype(int),
-            End=lambda df: df.End.astype(int),
-        )
+        if not df_peaks.empty:
+            df_peaks = (
+                df_peaks.sort_values(["Chromosome", "Start"])
+                .reset_index(drop=True)
+                .assign(
+                    Start=lambda df: df.Start.astype(int),
+                    End=lambda df: df.End.astype(int),
+                )
+            )
 
-        logger.info(f"Total number of peaks identified: {df_peaks.shape[0]}")
+            logger.info(f"Total number of peaks identified: {df_peaks.shape[0]}")
 
-        if self.apply_background_filter:
-            df_peaks = self.background_filter(df_peaks, threshold=0.95)
+            # Apply filters. add_signal is called only once inside if needed.
+            from lanceotron_mcc.api.signal import add_signal
 
-        if self.apply_signal_filter:
-            df_peaks = self.iqr_filter(df_peaks, threshold=3.0)
+            df_peaks = add_signal(df_peaks, self.bigwig).df
+            df_peaks = df_peaks.assign(
+                is_background=lambda df: np.where(
+                    df.Chromosome != self.cis_chromosome, True, False
+                )
+            )
+
+            if self.apply_background_filter:
+                # Optimized background filter
+                threshold_val = df_peaks.query("is_background")["Signal"].quantile(0.95)
+                logger.info(f"Background threshold: {threshold_val}")
+                df_peaks = df_peaks.query("Signal >= @threshold_val")
+                logger.info(
+                    f"Number of peaks after background filtering: {df_peaks.shape[0]}"
+                )
+
+            if self.apply_signal_filter:
+                # Optimized IQR filter
+                logger.info("Applying IQR filter")
+                df_peaks = df_peaks.assign(signal_log1p=lambda df: np.log1p(df.Signal))
+                signal_vals = df_peaks["signal_log1p"].values
+                if len(signal_vals) > 0:
+                    q1 = np.percentile(signal_vals, 25)
+                    q3 = np.percentile(signal_vals, 75)
+                    iqr = q3 - q1
+                    iqr_threshold = q3 + (3.0 * iqr)
+                    logger.info(f"IQR threshold: {iqr_threshold}")
+                    df_peaks = df_peaks.query("signal_log1p > @iqr_threshold")
+                logger.info(f"Number of peaks after IQR filtering: {df_peaks.shape[0]}")
+
+            # Final output should only contain cis-chromosome peaks
+            df_peaks = df_peaks.query("is_background == False").drop(
+                columns=["is_background", "signal_log1p"], errors="ignore"
+            )
 
         return df_peaks
-    

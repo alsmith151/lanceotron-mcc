@@ -4,6 +4,7 @@ pandas>2,<2.2.23
 polars<1.9
 pyBigWig<=0.3.18
 pydantic>2,<=2.11.3
+pybigtools
 pyranges
 torch<=2.6
 tqdm

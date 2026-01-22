@@ -4,7 +4,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import polars as pl
-import pyBigWig
+import pybigtools
 import pydantic
 import pyranges as pr
 from loguru import logger
@@ -52,29 +52,27 @@ class Chromosomes:
 
     @classmethod
     def from_bigwig(cls, bigwig_file: str):
-        with pyBigWig.open(bigwig_file) as bw:
-            chromosomes = list(bw.chroms())
-
+        bw = pybigtools.open(bigwig_file)
+        chromosomes = list(bw.chroms().keys())
         return cls(chromosomes=chromosomes)
 
     def sample(self, n: int):
-
         chroms = list(self.chromosomes)
         chroms_sampled = list(np.random.choice(chroms, n))
         return Chromosomes(chromosomes=chroms_sampled)
-    
+
     def __str__(self):
         return f"Chromosomes({self.chromosomes})"
 
     def __format__(self, format_spec: str) -> str:
         return f"Chromosomes({self.chromosomes})"
-    
+
     def __add__(self, other):
-        
         chroms_left = self.chromosomes.copy()
         chroms_right = other.chromosomes.copy()
 
         return Chromosomes(chromosomes={*chroms_left, *chroms_right})
+
 
 class ChromosomeStats(pydantic.BaseModel):
     name: str
@@ -83,16 +81,16 @@ class ChromosomeStats(pydantic.BaseModel):
     std: float
 
 
-
 def get_device(use_gpu: bool) -> str:
     """
     Get the device type (CPU or GPU) based on the environment variable.
     """
     import torch
+
     device = "cpu"
     if use_gpu and torch.cuda.is_available():
         device = "cuda"
     elif use_gpu and torch.backends.mps.is_available():
         device = "mps"
-    
+
     return device
