@@ -2,3 +2,10 @@
 *egg-info
 __pycache__/
 test_*
+lanceotron_mcc/call_peaks.py
+uv.lock
+.gitignore
+peak_model.pt
+SEM-wash-out_dTag13_rep2_BCL2.bigWig
+output.bed
+output_no_mcc.bed

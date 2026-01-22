@@ -233,102 +233,57 @@ def _filter_enriched_regions(
 
 def find_enriched_regions(
     array: torch.Tensor,
-    threshold: torch.Tensor,
+    threshold: Union[torch.Tensor, float],
     min_region_size: int = 0,
     max_region_size: Optional[int] = None,
 ):
     """Find regions in the array where values exceed the threshold.
-
-    This function is optimized to handle device compatibility issues,
-    particularly with Apple MPS devices.
+    Optimized for high-performance GPU execution (CUDA/MPS).
     """
-    # Check if input is MPS device
-    original_device = array.device
-    is_mps = original_device.type == "mps"
+    device = array.device
 
-    # Only move to CPU if absolutely necessary (MPS device)
-    if is_mps:
-        processing_device = torch.device("cpu")
-        array = array.to(processing_device)
-        if isinstance(threshold, torch.Tensor):
-            threshold = threshold.to(processing_device)
-    else:
-        processing_device = original_device
-
-    # Convert threshold to tensor if it's not already
+    # Convert threshold to tensor if it's a scalar
     if not isinstance(threshold, torch.Tensor):
-        threshold = torch.tensor(threshold, device=processing_device, dtype=array.dtype)
-
-    # Memory-optimized version of: truth_array = (array > 0) & (array >= threshold)
-    # Handle threshold as scalar or tensor
-    if threshold.numel() == 1:
-        # Use the max function to combine both conditions
-        threshold_value = max(0.0, float(threshold.item()))
-        truth_array = array >= torch.tensor(
-            threshold_value, dtype=array.dtype, device=array.device
-        )
+        threshold_t = torch.tensor(threshold, device=device, dtype=array.dtype)
     else:
-        # For tensor thresholds with multiple values, we need to be more careful
-        # First create the mask based on threshold
-        truth_array = array >= threshold
-        # Then apply the > 0 condition in-place
-        truth_array &= array > 0
+        threshold_t = threshold
 
-    # Check if there are any True values in the truth array
+    # Vectorized boolean comparison
+    if threshold_t.numel() == 1:
+        truth_array = array >= threshold_t
+    else:
+        truth_array = (array >= threshold_t) & (array > 0)
+
+    # If no regions found, return early
     if not truth_array.any():
-        # Return empty tensor if no regions found
-        empty_result = torch.empty((0, 2), dtype=torch.float32, device=original_device)
-        return empty_result
+        return torch.empty((0, 2), dtype=torch.float32, device=device)
 
-    # Find the indices where the value changes from True to False or vice versa
-    coord_array = torch.where(truth_array[:-1] != truth_array[1:])[0] + 1
+    # Find boundaries (0 -> 1 or 1 -> 0)
+    # prepend/append False to handle edge cases automatically
+    padded = torch.cat(
+        [
+            torch.tensor([False], device=device),
+            truth_array,
+            torch.tensor([False], device=device),
+        ]
+    )
 
-    # Handle the case where there are no changes in the truth array
-    if coord_array.numel() == 0:
-        if truth_array[0]:
-            # The entire array is an enriched region
-            result = torch.tensor(
-                [[0, len(array)]], dtype=torch.float32, device=processing_device
-            )
-            return result.to(original_device) if is_mps else result
-        else:
-            # No enriched regions
-            return torch.empty((0, 2), dtype=torch.float32, device=original_device)
+    # diff() gives +1 for starts and -1 for ends
+    diff = padded[1:].int() - padded[:-1].int()
+    starts = torch.where(diff == 1)[0]
+    ends = torch.where(diff == -1)[0]
 
-    # Handle the case where the first/last elements are part of enriched regions
-    if truth_array[0]:
-        coord_array = torch.cat(
-            [torch.tensor([0], device=processing_device), coord_array]
-        )
-    if truth_array[-1]:
-        coord_array = torch.cat(
-            [coord_array, torch.tensor([len(array)], device=processing_device)]
-        )
+    # Combine into (N, 2)
+    enriched_regions = torch.stack([starts, ends], dim=1).to(torch.float32)
 
-    # Ensure we have an even number of coordinates
-    if coord_array.numel() % 2 != 0:
-        if not truth_array[0]:
-            coord_array = torch.cat(
-                [coord_array, torch.tensor([len(array)], device=processing_device)]
-            )
+    # Filter by size
+    if min_region_size > 0 or max_region_size is not None:
+        max_size = max_region_size if max_region_size is not None else len(array)
+        region_sizes = enriched_regions[:, 1] - enriched_regions[:, 0]
+        size_mask = (region_sizes >= min_region_size) & (region_sizes <= max_size)
+        enriched_regions = enriched_regions[size_mask]
 
-    # Reshape the coordinate array to pairs of start and end indices
-    enriched_regions = coord_array.reshape(-1, 2).to(torch.float32)
-
-    # If max_region_size is not specified, set it to the length of the array
-    if max_region_size is None:
-        max_region_size = len(array)
-
-    # Filter regions by size using vectorized operations
-    region_sizes = enriched_regions[:, 1] - enriched_regions[:, 0]
-    size_mask = (region_sizes >= min_region_size) & (region_sizes <= max_region_size)
-    filtered_regions = enriched_regions[size_mask]
-
-    # Move back to the original device if needed
-    if is_mps:
-        filtered_regions = filtered_regions.to(original_device)
-
-    return filtered_regions
+    return enriched_regions
 
 
 def add_signal(
@@ -386,3 +341,62 @@ def add_signal(
     peaks["Signal"] = peaks["Signal"].fillna(0)
 
     return pr.PyRanges(peaks)
+
+
+def extract_fixed_signal_windows(
+    bigwig: Union[pathlib.Path, str],
+    regions: pd.DataFrame,
+    window_size: int = 200,
+    device: str = "cpu",
+) -> torch.Tensor:
+    """
+    Extract fixed-width signal windows centered on the given regions.
+    Returns a torch Tensor of shape (num_regions, window_size).
+    """
+    if regions.empty:
+        return torch.empty((0, window_size), device=device)
+
+    if isinstance(bigwig, pathlib.Path):
+        bigwig = str(bigwig)
+
+    bw = pybigtools.open(bigwig)
+    chrom_sizes = bw.chroms()
+
+    half_window = window_size // 2
+    signals = []
+
+    for _, row in regions.iterrows():
+        chrom = row["Chromosome"]
+        # Center of the region
+        center = int((row["Start"] + row["End"]) // 2)
+        start = center - half_window
+        end = start + window_size
+
+        # Clamp to chromosome boundaries
+        chrom_len = chrom_sizes.get(chrom)
+        if chrom_len is None:
+            logger.warning(f"Chromosome {chrom} not found in bigwig")
+            signals.append(np.zeros(window_size, dtype=np.float32))
+            continue
+
+        actual_start = max(0, start)
+        actual_end = min(chrom_len, end)
+
+        vals = bw.values(chrom, actual_start, actual_end)
+
+        if vals is None:
+            vals = np.zeros(window_size, dtype=np.float32)
+        else:
+            # Pad if we hit boundaries
+            if len(vals) < window_size:
+                pad_left = actual_start - start
+                pad_right = end - actual_end
+                vals = np.pad(
+                    vals, (max(0, pad_left), max(0, pad_right)), mode="constant"
+                )
+                # Ensure exactly window_size
+                vals = vals[:window_size]
+
+        signals.append(vals)
+
+    return torch.tensor(np.array(signals), device=device, dtype=torch.float32)

@@ -11,3 +11,4 @@ tqdm
 typer
 cyclopts
 joblib
+lightning

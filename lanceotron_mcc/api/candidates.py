@@ -1,5 +1,4 @@
 import concurrent.futures
-import itertools
 import multiprocessing
 import pathlib
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -47,94 +46,48 @@ class EnrichedRegionsResult(pydantic.BaseModel):
         return df
 
 
-def search_enriched_regions(
-    array: torch.Tensor,
-    background: int,
-    window: int,
-    threshold: float,
-    background_global_min: Optional[float] = None,
-    min_region_size: int = 0,
-    max_region_size: Optional[int] = None,
-) -> torch.Tensor:
-    # Compute the moving average of the array
-    array_windowed = average_array(array, window)
-
-    # Compute the background array
-    background_array = average_array(array, background)
-
-    # Compute the threshold array
-    threshold_array = background_array * threshold
-
-    # Apply global minimum threshold if specified
-    if background_global_min is not None:
-        threshold_array = torch.maximum(
-            threshold_array, torch.tensor(background_global_min)
-        )
-
-    # Identify enriched regions
-    enriched_regions = find_enriched_regions(
-        array_windowed, threshold_array, min_region_size, max_region_size
-    )
-    return enriched_regions
-
-
 def search_enriched_regions_param_grid(
     array: torch.Tensor, params: EnrichedRegionsParams, label: Optional[str] = None
 ) -> EnrichedRegionsResult:
     """
-    Find enriched regions in parallel using GPU acceleration.
+    Find enriched regions using a vectorized parameter grid search on the GPU.
     """
-    # Move array to device if it's not already there
     device = array.device
 
-    # Initialize threshold array on the same device
-    threshold_array = torch.zeros(array.shape, dtype=torch.int8, device=device)
+    # 1. Pre-calculate unique moving averages for windows and backgrounds
+    unique_windows = sorted(list(set(params.window_list + params.background_list)))
+    averages_cache = {w: average_array(array, w) for w in unique_windows}
 
-    # Generate all parameter combinations
-    combinations = list(
-        itertools.product(
-            params.background_list, params.window_list, params.threshold_list
+    # 2. Cumulative threshold array (vectorized summation of boolean results)
+    # Using float32 for summation to avoid overflow before converting to int8/int16
+    threshold_sum = torch.zeros(array.shape, dtype=torch.float32, device=device)
+
+    # Generate background global min tensor once
+    bg_min_t = None
+    if params.background_global_min is not None:
+        bg_min_t = torch.tensor(
+            params.background_global_min, device=device, dtype=array.dtype
         )
-    )
 
-    # Process combinations in batches for better GPU utilization
-    batch_size = min(16, len(combinations))  # Adjust batch size as needed
+    # 3. Process the parameter grid
+    for background in params.background_list:
+        bg_avg = averages_cache[background]
+        for window in params.window_list:
+            win_avg = averages_cache[window]
+            for threshold in params.threshold_list:
+                # Calculate threshold array for this combination
+                t_arr = bg_avg * threshold
+                if bg_min_t is not None:
+                    t_arr = torch.maximum(t_arr, bg_min_t)
 
-    for i in range(0, len(combinations), batch_size):
-        batch = combinations[i : i + batch_size]
-        batch_regions = []
+                # Vectorized comparison: directly add boolean results to the cumulative sum
+                # Multiplying by win_avg > 0 ensures we don't pick up regions with no signal
+                threshold_sum += (win_avg >= t_arr) & (win_avg > 0)
 
-        for background, window, threshold in batch:
-            regions = search_enriched_regions(
-                array=array,
-                background=background,
-                window=window,
-                threshold=threshold,
-                background_global_min=params.background_global_min,
-                min_region_size=params.min_region_size,
-                max_region_size=params.max_region_size,
-            )
-            batch_regions.append(regions)
+    # Convert final sum to target storage type
+    threshold_array = threshold_sum.to(torch.int8)
 
-        # Vectorized update of threshold_array using a difference array
-        # This is much faster than sliced updates in a loop
-        diff = torch.zeros(array.shape[0] + 1, dtype=torch.int32, device=device)
-
-        for regions in batch_regions:
-            if regions.shape[0] > 0:
-                starts = regions[:, 0].to(torch.long)
-                ends = regions[:, 1].to(torch.long)
-
-                # Update difference array
-                # Use scatter_add_ for batch updates if possible,
-                # but direct indexing with multiple indices works in PyTorch
-                diff.index_add_(0, starts, torch.ones_like(starts, dtype=torch.int32))
-                diff.index_add_(0, ends, -torch.ones_like(ends, dtype=torch.int32))
-
-        # Compute cumulative sum to get the threshold counts at each position
-        threshold_array += torch.cumsum(diff, dim=0)[:-1].to(torch.int8)
-
-    # Identify final enriched regions based on the cumulative threshold array
+    # 4. Identify final enriched regions based on the cumulative threshold
     enriched_regions_final = find_enriched_regions(
         threshold_array,
         params.threshold_cumulative,
@@ -146,8 +99,7 @@ def search_enriched_regions_param_grid(
         return EnrichedRegionsResult(
             enriched_regions=enriched_regions_final, threshold_array=threshold_array
         )
-    else:
-        return EnrichedRegionsResult(enriched_regions=enriched_regions_final)
+    return EnrichedRegionsResult(enriched_regions=enriched_regions_final)
 
 
 class PeakSet:
@@ -204,12 +156,59 @@ class PeakSet:
         vals = self.df["signal_log1p"].values
 
         if len(vals) > 0:
+            logger.info(
+                f"Signal (log1p) range: {vals.min():.4f} to {vals.max():.4f}, mean: {vals.mean():.4f}"
+            )
             q1, q3 = np.percentile(vals, [25, 75])
             iqr = q3 - q1
             threshold = q3 + (multiplier * iqr)
             logger.info(f"IQR threshold: {threshold:.4f}")
-            self.df = self.df[self.df["signal_log1p"] > threshold]
 
+            self.df = self.df[self.df["signal_log1p"] >= threshold]
+
+        return self
+
+    def filter_ml(
+        self,
+        model: torch.nn.Module,
+        window_size: int = 200,
+        batch_size: int = 64,
+        threshold: float = 0.5,
+        device: str = "cpu",
+    ):
+        """Filter peaks using a machine learning model."""
+        if self.empty:
+            return self
+
+        from lanceotron_mcc.api.signal import extract_fixed_signal_windows
+
+        logger.info(f"Applying ML filter with threshold {threshold}...")
+        model.eval()
+        model.to(device)
+
+        with torch.no_grad():
+            # Process in batches to avoid memory issues
+            indices = self.df.index.tolist()
+            keep_indices = []
+
+            for i in range(0, len(indices), batch_size):
+                batch_idx = indices[i : i + batch_size]
+                batch_df = self.df.loc[batch_idx]
+
+                signals = extract_fixed_signal_windows(
+                    self.bigwig, batch_df, window_size=window_size, device=device
+                )
+
+                preds = model(signals).cpu().numpy().flatten()
+
+                # Identify which rows in this batch to keep
+                batch_keep = [
+                    batch_idx[j] for j, p in enumerate(preds) if p >= threshold
+                ]
+                keep_indices.extend(batch_keep)
+
+        logger.info(f"ML filter: kept {len(keep_indices)} / {len(indices)} peaks")
+        self.df = self.df.loc[keep_indices].reset_index(drop=True)
         return self
 
     def finalize(self) -> pd.DataFrame:
@@ -511,6 +510,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         n_background: int = 1,
         apply_background_filter: bool = True,
         apply_signal_filter: bool = True,
+        iqr_multiplier: float = 3.0,
         device: str = None,
     ):
         super().__init__(bigwig, params, device=device)
@@ -524,6 +524,7 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
         )
         self.apply_background_filter = apply_background_filter
         self.apply_signal_filter = apply_signal_filter
+        self.iqr_multiplier = iqr_multiplier
 
     def estimate_cis_chromosome(self):
         chromosomes = Chromosomes.from_bigwig(self.bigwig)
@@ -704,7 +705,15 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
 
         return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
 
-    def call_candidate_peaks(self, n_jobs: int = 1) -> pd.DataFrame:
+    def call_candidate_peaks(
+        self,
+        n_jobs: int = 1,
+        train_ml: bool = False,
+        ml_model_path: Optional[str] = None,
+        ml_window_size: int = 200,
+        ml_threshold: float = 0.5,
+        epochs: int = 10,
+    ) -> pd.DataFrame:
         """Call candidate peaks and apply filtering pipeline."""
         target_chroms = self.select_chromosomes().chromosomes
 
@@ -724,7 +733,124 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             logger.info(f"Candidates after background filtering: {peaks.count}")
 
         if self.apply_signal_filter:
-            peaks.filter_iqr()
+            peaks.filter_iqr(multiplier=self.iqr_multiplier)
             logger.info(f"Candidates after IQR filtering: {peaks.count}")
+
+        # 3. Semi-supervised ML Filtering
+        if train_ml or (ml_model_path and pathlib.Path(ml_model_path).exists()):
+            from lanceotron_mcc.api.models import is_ml_available
+
+            if not is_ml_available():
+                logger.warning(
+                    "Machine learning features (lightning) are not available. Skipping ML filtering."
+                )
+                return peaks.finalize()
+
+        if train_ml:
+            from lanceotron_mcc.api.models import SignalViT
+            from lanceotron_mcc.api.signal import extract_fixed_signal_windows
+            import lightning as L
+            from torch.utils.data import DataLoader, TensorDataset
+
+            logger.info(
+                "Starting semi-supervised ML training with PyTorch Lightning..."
+            )
+
+            # Prepare training data
+            # Positive: Current candidate peaks on cis-chromosome
+            pos_df = peaks.df[peaks.df.Chromosome == self.cis_chromosome]
+            if pos_df.empty:
+                logger.warning("No candidate peaks for ML training. Skipping.")
+            else:
+                # Negative: Random regions from background chromosomes
+                bg_chroms = [c for c in target_chroms if c != self.cis_chromosome]
+                if not bg_chroms:
+                    logger.warning(
+                        "No background chromosomes for ML training. Skipping."
+                    )
+                else:
+                    neg_regions = []
+                    bw = pybigtools.open(self.bigwig)
+                    chrom_sizes = bw.chroms()
+
+                    # Sample negatives roughly equal to positives
+                    for i in range(len(pos_df)):
+                        chrom = np.random.choice(bg_chroms)
+                        size = chrom_sizes[chrom]
+                        start = np.random.randint(0, size - ml_window_size)
+                        neg_regions.append(
+                            {
+                                "Chromosome": chrom,
+                                "Start": start,
+                                "End": start + ml_window_size,
+                            }
+                        )
+
+                    neg_df = pd.DataFrame(neg_regions)
+
+                    # Extract signals
+                    pos_signal = extract_fixed_signal_windows(
+                        self.bigwig,
+                        pos_df,
+                        window_size=ml_window_size,
+                        device=self.device,
+                    )
+                    neg_signal = extract_fixed_signal_windows(
+                        self.bigwig,
+                        neg_df,
+                        window_size=ml_window_size,
+                        device=self.device,
+                    )
+
+                    # Create Dataset
+                    x_train = torch.cat([pos_signal, neg_signal], dim=0)
+                    y_train = torch.cat(
+                        [
+                            torch.ones(pos_signal.shape[0], 1),
+                            torch.zeros(neg_signal.shape[0], 1),
+                        ],
+                        dim=0,
+                    )
+                    train_loader = DataLoader(
+                        TensorDataset(x_train, y_train), batch_size=32, shuffle=True
+                    )
+
+                    # Initialize model and trainer
+                    model = SignalViT(input_dim=ml_window_size).to(self.device)
+                    trainer = L.Trainer(
+                        max_epochs=epochs,
+                        accelerator="auto",
+                        devices=1,
+                        enable_checkpointing=False,
+                        logger=False,
+                    )
+
+                    trainer.fit(model, train_loader)
+
+                    if ml_model_path:
+                        torch.save(model.state_dict(), ml_model_path)
+                        logger.info(f"Model saved to {ml_model_path}")
+
+                    # Apply filter
+                    peaks.filter_ml(
+                        model,
+                        window_size=ml_window_size,
+                        threshold=ml_threshold,
+                        device=self.device,
+                    )
+
+        elif ml_model_path and pathlib.Path(ml_model_path).exists():
+            from lanceotron_mcc.api.models import load_model
+
+            logger.info(f"Loading ML model from {ml_model_path} for filtering...")
+            model = load_model(
+                ml_model_path, device=self.device, input_dim=ml_window_size
+            )
+            peaks.filter_ml(
+                model,
+                window_size=ml_window_size,
+                threshold=ml_threshold,
+                device=self.device,
+            )
 
         return peaks.finalize()

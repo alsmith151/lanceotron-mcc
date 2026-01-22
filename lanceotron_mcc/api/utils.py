@@ -81,7 +81,7 @@ class ChromosomeStats(pydantic.BaseModel):
     std: float
 
 
-def get_device(use_gpu: bool) -> str:
+def get_device(use_gpu: bool = True) -> str:
     """
     Get the device type (CPU or GPU) based on the environment variable.
     """
