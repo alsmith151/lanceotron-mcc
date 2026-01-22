@@ -2,7 +2,7 @@ import pathlib
 import numpy as np
 import pandas as pd
 import pyranges as pr
-from typing import Union, List, Tuple, Dict, Optional, Any
+from typing import Union, Optional
 from loguru import logger
 import pybigtools
 

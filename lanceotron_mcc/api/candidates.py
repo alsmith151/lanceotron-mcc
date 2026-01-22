@@ -1,4 +1,3 @@
-import concurrent.futures
 import multiprocessing
 import pathlib
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -10,7 +9,6 @@ import pydantic
 import pyranges as pr
 import torch
 import torch.multiprocessing as mp
-import tqdm
 from joblib import Parallel, delayed
 from loguru import logger
 
@@ -719,7 +717,9 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
 
         # 1. Identification phase
         df_raw = self._identify_all_candidates(target_chroms, n_jobs)
+        logger.info(f"Raw candidates identified: {len(df_raw)}")
         if df_raw.empty:
+            logger.warning("No candidate peaks identified at all!")
             return df_raw
 
         # 2. Filtering phase using PeakSet abstraction
@@ -757,87 +757,120 @@ class CandidatePeakCallerMCC(CandidatePeakCaller):
             )
 
             # Prepare training data
-            # Positive: Current candidate peaks on cis-chromosome
-            pos_df = peaks.df[peaks.df.Chromosome == self.cis_chromosome]
+            # Positive: Candidate peaks on the cis-chromosome
+            pos_df = peaks.df[peaks.df.Chromosome == self.cis_chromosome].copy()
+
+            # Negative: Candidate peaks from background chromosomes (Hard Negatives)
+            # plus additional random regions if needed
+            neg_peaks_df = peaks.df[peaks.df.Chromosome != self.cis_chromosome].copy()
+
             if pos_df.empty:
-                logger.warning("No candidate peaks for ML training. Skipping.")
+                logger.warning(
+                    "No candidate peaks on cis-chromosome for ML training. Skipping."
+                )
             else:
-                # Negative: Random regions from background chromosomes
-                bg_chroms = [c for c in target_chroms if c != self.cis_chromosome]
-                if not bg_chroms:
-                    logger.warning(
-                        "No background chromosomes for ML training. Skipping."
-                    )
+                # Determine how many random negatives to add to balance the dataset
+                # We want at least as many negatives as positives
+                n_pos = len(pos_df)
+                n_neg_peaks = len(neg_peaks_df)
+                n_random_needed = max(0, n_pos - n_neg_peaks)
+
+                neg_regions = []
+                if n_random_needed > 0:
+                    bg_chroms = [c for c in target_chroms if c != self.cis_chromosome]
+                    if bg_chroms:
+                        bw = pybigtools.open(self.bigwig)
+                        chrom_sizes = bw.chroms()
+                        for _ in range(n_random_needed):
+                            chrom = np.random.choice(bg_chroms)
+                            size = chrom_sizes[chrom]
+                            if size > ml_window_size:
+                                start = np.random.randint(0, size - ml_window_size)
+                                neg_regions.append(
+                                    {
+                                        "Chromosome": chrom,
+                                        "Start": start,
+                                        "End": start + ml_window_size,
+                                    }
+                                )
+
+                # Combine background peaks and random regions into negative set
+                if neg_regions:
+                    random_neg_df = pd.DataFrame(neg_regions)
+                    neg_df = pd.concat([neg_peaks_df, random_neg_df], ignore_index=True)
                 else:
-                    neg_regions = []
-                    bw = pybigtools.open(self.bigwig)
-                    chrom_sizes = bw.chroms()
+                    neg_df = neg_peaks_df
 
-                    # Sample negatives roughly equal to positives
-                    for i in range(len(pos_df)):
-                        chrom = np.random.choice(bg_chroms)
-                        size = chrom_sizes[chrom]
-                        start = np.random.randint(0, size - ml_window_size)
-                        neg_regions.append(
-                            {
-                                "Chromosome": chrom,
-                                "Start": start,
-                                "End": start + ml_window_size,
-                            }
+                # Extract signals
+                logger.info(
+                    f"Extracting signals: {n_pos} positives, {n_neg_peaks} hard negatives, {len(neg_regions)} random negatives."
+                )
+                pos_signal = extract_fixed_signal_windows(
+                    self.bigwig,
+                    pos_df,
+                    window_size=ml_window_size,
+                    device=self.device,
+                )
+                neg_signal = extract_fixed_signal_windows(
+                    self.bigwig,
+                    neg_df,
+                    window_size=ml_window_size,
+                    device=self.device,
+                )
+
+                # Calculate Signal-Weighted Soft Labels
+                # Teach the model that stronger peaks are "more trustworthy"
+                # We normalize the log-signal of cis-peaks to a range like [0.5, 1.0]
+                pos_signal_vals = np.log1p(pos_df["Signal"].values)
+                if len(pos_signal_vals) > 1:
+                    p_min, p_max = pos_signal_vals.min(), pos_signal_vals.max()
+                    if p_max > p_min:
+                        pos_targets_np = 0.5 + 0.5 * (pos_signal_vals - p_min) / (
+                            p_max - p_min
                         )
+                    else:
+                        pos_targets_np = np.ones_like(pos_signal_vals)
+                else:
+                    pos_targets_np = np.ones_like(pos_signal_vals)
 
-                    neg_df = pd.DataFrame(neg_regions)
+                pos_targets = torch.tensor(
+                    pos_targets_np, dtype=torch.float32, device=self.device
+                ).view(-1, 1)
+                neg_targets = torch.zeros(
+                    neg_signal.shape[0], 1, dtype=torch.float32, device=self.device
+                )
 
-                    # Extract signals
-                    pos_signal = extract_fixed_signal_windows(
-                        self.bigwig,
-                        pos_df,
-                        window_size=ml_window_size,
-                        device=self.device,
-                    )
-                    neg_signal = extract_fixed_signal_windows(
-                        self.bigwig,
-                        neg_df,
-                        window_size=ml_window_size,
-                        device=self.device,
-                    )
+                # Create Dataset
+                x_train = torch.cat([pos_signal, neg_signal], dim=0)
+                y_train = torch.cat([pos_targets, neg_targets], dim=0)
 
-                    # Create Dataset
-                    x_train = torch.cat([pos_signal, neg_signal], dim=0)
-                    y_train = torch.cat(
-                        [
-                            torch.ones(pos_signal.shape[0], 1),
-                            torch.zeros(neg_signal.shape[0], 1),
-                        ],
-                        dim=0,
-                    )
-                    train_loader = DataLoader(
-                        TensorDataset(x_train, y_train), batch_size=32, shuffle=True
-                    )
+                train_loader = DataLoader(
+                    TensorDataset(x_train, y_train), batch_size=32, shuffle=True
+                )
 
-                    # Initialize model and trainer
-                    model = SignalViT(input_dim=ml_window_size).to(self.device)
-                    trainer = L.Trainer(
-                        max_epochs=epochs,
-                        accelerator="auto",
-                        devices=1,
-                        enable_checkpointing=False,
-                        logger=False,
-                    )
+                # Initialize model and trainer
+                model = SignalViT(input_dim=ml_window_size).to(self.device)
+                trainer = L.Trainer(
+                    max_epochs=epochs,
+                    accelerator="auto",
+                    devices=1,
+                    enable_checkpointing=False,
+                    logger=False,
+                )
 
-                    trainer.fit(model, train_loader)
+                trainer.fit(model, train_loader)
 
-                    if ml_model_path:
-                        torch.save(model.state_dict(), ml_model_path)
-                        logger.info(f"Model saved to {ml_model_path}")
+                if ml_model_path:
+                    torch.save(model.state_dict(), ml_model_path)
+                    logger.info(f"Model saved to {ml_model_path}")
 
-                    # Apply filter
-                    peaks.filter_ml(
-                        model,
-                        window_size=ml_window_size,
-                        threshold=ml_threshold,
-                        device=self.device,
-                    )
+                # Apply filter
+                peaks.filter_ml(
+                    model,
+                    window_size=ml_window_size,
+                    threshold=ml_threshold,
+                    device=self.device,
+                )
 
         elif ml_model_path and pathlib.Path(ml_model_path).exists():
             from lanceotron_mcc.api.models import load_model
