@@ -27,7 +27,9 @@ uv run --extra legacy lanceotron-mcc call-legacy-peaks --help
 ```
 
 Extras are selected per `uv run` invocation, so include `--extra legacy` on each
-legacy command. See [CLI reference](cli.md) for command options and
+legacy command. `footprint` PDFs likewise need the `plot` extra (matplotlib):
+`uv sync --extra plot` and `uv run --extra plot lanceotron-mcc footprint ...`, or
+pass `--no-plot` for tables only. The `dev` extra includes matplotlib. See [CLI reference](cli.md) for command options and
 [methods](methods.md) for detection behavior and interpretation.
 
 ## Dependency locking

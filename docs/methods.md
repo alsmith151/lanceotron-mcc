@@ -51,6 +51,32 @@ selection uses enrichment, consensus, majority replicate support and minimum
 pooled **raw** reporter events. `MinimumBinQ` summarizes a peak's bins and is not
 a peak-level FDR. Direct BAM and Cooler adapters are not included.
 
+## Junction footprints
+
+MNase digests DNA that is not protected by bound protein, so the ligation
+junctions of an MCC fragment sit at the edges of the protected region. Counting
+junction ends at single-base resolution, instead of read coverage, gives a
+profile similar to DNase I footprinting: a protected binding site shows a
+depletion of junctions flanked by peaks of junctions.
+
+Each junction end is assigned the direction in which its ligated fragment
+extends. For MCCNado reporters this follows from the reporter side in the read
+name (`start` is a segment to the right of the viewpoint in the read, `end` to the
+left) and the alignment strand; the capture end takes the complementary
+orientation. `Downstream` junctions are the left boundary of a protected fragment
+and `Upstream` junctions its right boundary, so plotting them separately places
+the protein between the two peaks rather than over the whole fragment.
+
+The contact map pairs each reporter junction with the capture junction from the
+same read. Arrows show the fragment direction at both ends, which identifies
+the protein at the capture site and the one at the reporter site that gave rise
+to each ligation (for example the two interacting CTCF sites around a protected
+central motif).
+
+Profiles and maps are descriptive. No footprint calling or significance test is
+applied; counts are junction events, not unique molecules, and depend on MNase
+digestion level. Compare samples at matched depth and digestion.
+
 ## Validation limits
 
 There is no independent gold standard in this repository. Evaluate held-out

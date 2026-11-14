@@ -115,6 +115,50 @@ from one molecule.
 See [the experimental count model](methods.md#experimental-count-statistics)
 for score interpretation. `--alpha` annotates bins and does not filter peaks.
 
+## Junction footprints
+
+`footprint` reports the exact base-pair positions of ligation junctions instead of
+read pile-ups. It reads the same manifest and MCCNado `.pairs` files as
+`call-count-peaks`:
+
+```bash
+uv sync --extra plot
+uv run --extra plot lanceotron-mcc footprint \
+  --manifest manifest.tsv --viewpoint BRD4 \
+  --viewpoint-bed viewpoints.bed --chrom-sizes genome.chrom.sizes \
+  --peaks brd4_peaks.bed --output footprints/BRD4
+```
+
+`--peaks` takes BED3/BED4 reporter regions, such as the output of
+`call-count-peaks`; names come from column 4, otherwise `peak_1`, `peak_2`, ….
+Without it the capture-oligo tiles are profiled. Each reporter region is widened
+by `--reporter-flank` (default 100 bp). A capture junction must fall within
+`--capture-flank` (default 50 bp) of an oligo to enter the contact map.
+
+Inputs must come from a current MCCNado release, where `pos1` is the reporter
+ligation junction and `pos2` the capture-side junction, and the read name carries
+the reporter side (`start`/`end`). Older releases wrote the far end of the reporter
+segment into `pos2`; with such files the contact map is empty and the command
+warns. Regenerate the ligation junctions in that case. Flipped (`#shape`) pairs
+lose MCC endpoint order and are rejected unless `--orientation-source unknown`.
+Contacts without side or strand information stop the run unless
+`--allow-unoriented` is given, in which case they are counted as `Unknown`.
+
+| Output | Content |
+|---|---|
+| `PREFIX.profiles.tsv.gz` | One row per sample, region and base: `Upstream`, `Downstream`, `Unknown`, `Total` junction ends |
+| `PREFIX.contacts.tsv` | Sparse single-base map: `CapturePosition`, `ReporterPosition`, the fragment direction at each end, and `Count` |
+| `PREFIX.regions.tsv` | Profiled capture (`capture:oligo_N`) and reporter (`reporter:NAME`) windows after flanking |
+| `PREFIX.metrics.json` | Parameters, input identities, versions and per-sample QC counters and warnings |
+| `PREFIX.pdf` | One page per reporter region (up to `--max-panels`); omitted with `--no-plot` |
+
+Positions are zero-based. `Upstream` or `Downstream` gives the side of the
+junction on which the ligated fragment, and therefore the protecting protein,
+lies. Exact repeated read-ID/endpoint rows are collapsed by default
+(`--no-deduplicate` keeps them); parent reads are not collapsed. See
+[junction footprints](methods.md#junction-footprints) for interpretation.
+`--max-profile-bases` and `--max-contacts` bound memory use.
+
 ## Original heuristic
 
 The original method has a separate command and optional dependencies:

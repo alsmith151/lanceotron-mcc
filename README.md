@@ -1,7 +1,8 @@
 # lanceotron-mcc
 
 Distance-aware MCC peak calling from BigWig signal or SeqNado reporter events,
-with replicate support and reusable local caches.
+with replicate support and reusable local caches, plus base-pair ligation-junction
+footprinting at capture and reporter sites.
 
 ## Install and run with uv
 
@@ -36,6 +37,7 @@ provenance JSON.
 |---|---|
 | `call-bigwig-peaks` | BigWig signal; distance-aware enrichment and replicate support |
 | `call-count-peaks` | Standard `.pairs` contacts; experimental bin statistics |
+| `footprint` | MCCNado ligation junctions; base-pair junction footprints and capture × reporter maps (PDF needs the `plot` extra) |
 | `call-legacy-peaks` | Original multi-window heuristic; requires the `legacy` extra |
 
 For the original heuristic, include its extra when syncing and running:
