@@ -17,7 +17,8 @@ lanceotron-mcc = "lanceotron_mcc.call_peaks:main"
 
 [project.optional-dependencies]
 legacy = ["torch>=2.6,<3", "pyranges"]
-dev = ["pytest>=8", "ruff>=0.9", "torch>=2.6,<3", "pyranges"]
+plot = ["matplotlib>=3.8,<4"]
+dev = ["pytest>=8", "ruff>=0.9", "torch>=2.6,<3", "pyranges", "matplotlib>=3.8,<4"]
 
 [project.urls]
 Homepage = "https://github.com/alsmith151/lanceotron-mcc"
