@@ -7,3 +7,7 @@ build/
 dist/
 
 .ruff_cache/
+
+# Local example data (large, regenerate from MCCNado)
+example/
+/viewpoints.bed
