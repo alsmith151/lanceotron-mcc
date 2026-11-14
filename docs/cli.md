@@ -1,0 +1,194 @@
+# CLI and pipeline usage
+
+Run these examples from the repository root after `uv sync`. Use
+`uv run lanceotron-mcc --help` or append `--help` to any command to inspect its
+options. Each command writes a BED plus score/provenance sidecars.
+
+## BigWig calling
+
+```bash
+uv run lanceotron-mcc call-bigwig-peaks \
+  --bigwigs replicate1.bigWig replicate2.bigWig replicate3.bigWig \
+  --viewpoint-bed viewpoints.bed --viewpoint BRD4 \
+  --exclude-bed exclusion_regions.bed --bait-padding 100 \
+  --output peaks.bed --memory-budget-mb 1024 --threads 2
+```
+
+For a single sample, supply one path to `--bigwigs`. Multiple paths must represent
+separate biological replicates. Input files cannot alias the same physical file.
+A strict majority must meet the minimum enrichment threshold; two replicates
+therefore both need support. A single track has no reproducibility claim.
+
+Viewpoints use zero-based, half-open BED intervals. Multiple oligos may share a
+BED4 group name. Names ending in `-chr…-start-end` can be selected by their common
+prefix. `--viewpoint` is required when the BED contains multiple named groups;
+each call handles one group on one chromosome. Bait oligos and optional padding
+are excluded, together with `--exclude-bed`. Empty exclusion BEDs are accepted.
+Set padding according to the assay's bait-proximal artifact region; it defaults
+to zero.
+
+See [calling methods](methods.md) for normalization, background fitting and
+replicate support. Each replicate must have positive usable cis signal; empty
+replicates are rejected rather than silently removed.
+
+## Shared detection controls
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--window-sizes` | `200 400 600` | Foreground smoothing widths in bp |
+| `--background-windows` | `10000 100000 1000000` | Local background widths in bp |
+| `--thresholds` | `2 4 6` | Enrichment multipliers |
+| `--support-fraction` | `1/3` | Fraction of parameter combinations passing at each position |
+| `--min-peak-size` | `50` | Minimum retained width in bp |
+| `--max-peak-size` | `500` | Maximum resolved width in bp |
+
+The default support fraction is one third (9 of the default 27 combinations).
+Set fractions as decimals, for example `--support-fraction 0.5`.
+
+## Reporter-count input
+
+Create a tab-separated manifest. Paths are relative to the manifest directory:
+
+```text
+sample	viewpoint	pairs
+rep1	BRD4	mcc/replicates/rep1/ligation_junctions/BRD4.pairs.gz
+rep2	BRD4	mcc/replicates/rep2/ligation_junctions/BRD4.pairs.gz
+rep3	BRD4	mcc/replicates/rep3/ligation_junctions/BRD4.pairs.gz
+```
+
+```bash
+uv run lanceotron-mcc call-count-peaks \
+  --manifest samples.tsv --viewpoint BRD4 --viewpoint-bed viewpoints.bed \
+  --chrom-sizes hg38.chrom.sizes --exclude-bed exclusion_regions.bed \
+  --bin-size 50 --min-read-count 5 --memory-budget-mb 2048 \
+  --output count_peaks.bed
+```
+
+Input uses the standard tab-separated `.pairs` columns:
+
+```text
+readID chr1 pos1 chr2 pos2 strand1 strand2
+```
+
+These are the first seven columns, not an MCCNado-specific format. Coordinates
+are one-based. Standard `#` headers and additional columns (for example
+`pair_type`) are supported; extra annotations are not used for scoring.
+Headerless files produced by MCCNado are also accepted. See the
+[4DN pairs specification](https://github.com/4dn-dcic/pairix/blob/master/pairs_format_specification.md)
+and [pairtools format guide](https://pairtools.readthedocs.io/en/latest/formats.html).
+
+For ordinary pairs, the adapter identifies the capture by overlap with the
+selected viewpoint BED, regardless of endpoint order. The opposite end is the
+reporter, so upper-triangular/flipped pairs need no conversion. Contacts touching
+neither selected viewpoint interval, contacts with both ends in the selected
+viewpoint, and unmapped pairs are skipped and recorded in QC. Trans contacts are
+recorded in QC and do not enter cis calling.
+
+### MCCNado reporter-name annotations
+
+MCCNado uses the standard pairs container and retains reporter metadata in
+`readID`, with this structure:
+
+```text
+parent_id__viewpoint-chrom-start-end__start_or_end__read_number__flashed_status
+```
+
+The name identifies the parent read, capture oligo and which side of the original
+read contains the viewpoint. The embedded genomic interval describes the capture
+oligo; it is not the reporter's genomic junction coordinate. MCCNado combines
+this side information with alignments and strands upstream, then writes the
+calculated junction positions into `pos1`/`pos2`.
+
+The adapter bins the supplied junction positions without recalculating them from
+read names or replacing them with generic alignment starts. Recognized MCCNado
+annotations are used to validate the selected capture oligo and resolve either
+endpoint order. A junction at the encoded oligo's end boundary is accepted for
+these annotations; ordinary mapped-point overlap remains half-open. Contacts
+whose name identifies another capture oligo are skipped and recorded in QC.
+Parent IDs are not collapsed into molecule counts.
+
+Upstream mapping-quality filtering and deduplication remain the pipeline's
+responsibility; optional `pair_type` values are not an implicit filter. Counts
+represent reporter events, not unique molecules; several reporters may originate
+from one molecule.
+
+See [the experimental count model](methods.md#experimental-count-statistics)
+for score interpretation. `--alpha` annotates bins and does not filter peaks.
+
+## Original heuristic
+
+The original method has a separate command and optional dependencies:
+
+```bash
+uv sync --extra legacy
+uv run --extra legacy lanceotron-mcc call-legacy-peaks --bigwig sample.bigWig --output legacy.bed \
+  --cis-chromosome chr19 --device cpu --seed 0
+```
+
+`--device` accepts `auto`, `cpu`, `cuda` or `mps`. Whole chromosomes are processed,
+so working memory can exceed the cache budget. `--background-chromosomes` controls
+trans chromosome sampling. `--no-filter-background` disables the trans percentile
+filter; `--no-filter-outliers` disables the log-signal IQR filter. When both are
+active, their cutoffs are estimated from the same original candidate set and the
+results are intersected, so filter order does not change the result.
+
+Keep `--extra legacy` on uv run commands, so uv includes the optional Torch
+and PyRanges dependencies. Development commands use `--extra dev` instead.
+
+## SeqNado integration
+
+Use existing replicate BigWigs for signal calling. For count mode, SeqNado already
+produces `mcc/replicates/{sample}/ligation_junctions/{viewpoint}.pairs.gz`; supply
+these through the manifest above with the pipeline's viewpoint BED, exclusion
+BED and chromosome sizes.
+
+The BigWig invocation in a Snakemake shell block becomes:
+
+```text
+lanceotron-mcc call-bigwig-peaks \
+  --bigwigs {input.bigwigs:q} --viewpoint-bed {input.viewpoints:q} \
+  --viewpoint {wildcards.viewpoint_group:q} --exclude-bed {input.exclusions:q} \
+  --threads {threads} --output {output.peaks:q}
+```
+
+Declare all replicate files and metadata as inputs, and the required artifacts as
+outputs. Use `call-count-peaks` for the manifest-based workflow. GPU resources are
+only relevant to `call-legacy-peaks`. SeqNado itself is not modified here.
+
+The shell example invokes the binary directly in a prepared workflow environment
+or container. Prepare that environment with uv before submitting jobs; see
+[HPC and Ceph](hpc.md). Do not sync a new environment for each peak-calling job.
+
+## Outputs and diagnostics
+
+For `peaks.bed`:
+
+| File | Contents |
+|---|---|
+| `peaks.bed` | Resolved calls, BED3 |
+| `peaks.bed.unresolved.bed` | Broad unresolved regions, BED3 |
+| `peaks.bed.tsv` | All retained regions, statistics and support |
+| `peaks.bed.json` | Parameters, original input identities, versions, artifact paths and timings |
+| `peaks.bed.bins.tsv` | Count mode: all bins, eligibility, raw counts, expected values and tests |
+
+Coordinates are int64, zero-based and half-open. Count-mode summits identify the
+start of the strongest bin. `Signal`/`Sum` use normalized units across replicates;
+`Count` is the pooled raw reporter-event count. Process peak memory is a lifetime
+high-water mark, and read counters measure logical requests, not physical Ceph
+traffic.
+
+Output paths are checked against inputs, including symlink/hardlink aliases and
+sidecars. Artifacts are staged before replacement; renames are atomic per file,
+not across the whole bundle, and provenance is published last. Reusing a count
+output stem for signal calling removes its old count-bin sidecar. Original input
+identities are checked again before publication. Errors are concise by default;
+`--debug` includes diagnostic logs and runtime tracebacks, and `--quiet` suppresses
+informational messages.
+
+## CLI migration
+
+The old `call-mcc-peaks` command and compatibility aliases are removed. Use
+`call-bigwig-peaks --bigwigs ... --output ...`, `call-count-peaks`, or the explicit
+`call-legacy-peaks` command. Shared flags are `--thresholds`,
+`--background-windows`, `--support-fraction` and `--threads`; the absolute vote
+threshold and BigWig read-estimation flags are no longer exposed.
