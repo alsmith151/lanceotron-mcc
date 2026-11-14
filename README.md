@@ -14,9 +14,9 @@ uv run lanceotron-mcc --help
 ```
 
 `uv sync` creates the project's `.venv` and installs this package in editable mode.
-`uv run` selects that environment without requiring shell activation. This checkout
-does not currently include `uv.lock`; the first sync resolves dependencies and
-creates it. See [development](docs/development.md) for locking and optional extras.
+`uv run` selects that environment without requiring shell activation. The committed
+`uv.lock` pins the resolution; see [development](docs/development.md) for locking and
+optional extras.
 
 ## Call BigWig peaks
 

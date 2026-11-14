@@ -32,10 +32,9 @@ legacy command. See [CLI reference](cli.md) for command options and
 
 ## Dependency locking
 
-`uv sync` and `uv run` resolve dependencies and create `uv.lock` when it is absent.
-No lockfile is currently checked into this repository, so a fresh checkout does
-not yet share a pinned resolution. Review and commit a generated lockfile if the
-project adopts one; only then use `--locked` in CI to reject accidental updates.
+`uv.lock` is committed, so every checkout shares one pinned resolution, including
+all optional extras. Use `uv sync --locked` (and `uv lock --check`) in CI to reject
+a lockfile that no longer matches `pyproject.toml` or `requirements.txt`.
 
 After changing dependency declarations, run `uv lock` and sync the required extra
 again. Use `uv lock --upgrade` only for an intentional dependency refresh, then
