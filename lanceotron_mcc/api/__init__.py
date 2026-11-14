@@ -10,6 +10,8 @@ __all__ = [
     "adaptive",
     "background",
     "counts",
+    "junctions",
+    "junction_plotting",
 ]
 
 
