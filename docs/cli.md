@@ -159,26 +159,6 @@ lies. Exact repeated read-ID/endpoint rows are collapsed by default
 [junction footprints](methods.md#junction-footprints) for interpretation.
 `--max-profile-bases` and `--max-contacts` bound memory use.
 
-## Original heuristic
-
-The original method has a separate command and optional dependencies:
-
-```bash
-uv sync --extra legacy
-uv run --extra legacy mcc-peaks call-legacy-peaks --bigwig sample.bigWig --output legacy.bed \
-  --cis-chromosome chr19 --device cpu --seed 0
-```
-
-`--device` accepts `auto`, `cpu`, `cuda` or `mps`. Whole chromosomes are processed,
-so working memory can exceed the cache budget. `--background-chromosomes` controls
-trans chromosome sampling. `--no-filter-background` disables the trans percentile
-filter; `--no-filter-outliers` disables the log-signal IQR filter. When both are
-active, their cutoffs are estimated from the same original candidate set and the
-results are intersected, so filter order does not change the result.
-
-Keep `--extra legacy` on uv run commands, so uv includes the optional Torch
-and PyRanges dependencies. Development commands use `--extra dev` instead.
-
 ## SeqNado integration
 
 Use existing replicate BigWigs for signal calling. For count mode, SeqNado already
@@ -196,8 +176,9 @@ mcc-peaks call-bigwig-peaks \
 ```
 
 Declare all replicate files and metadata as inputs, and the required artifacts as
-outputs. Use `call-count-peaks` for the manifest-based workflow. GPU resources are
-only relevant to `call-legacy-peaks`. SeqNado itself is not modified here.
+outputs. Use `call-count-peaks` for the manifest-based workflow. All commands are
+CPU-only; `--threads` parallelises the compiled vote kernel. SeqNado itself is
+not modified here.
 
 The shell example invokes the binary directly in a prepared workflow environment
 or container. Prepare that environment with uv before submitting jobs; see
@@ -231,8 +212,8 @@ informational messages.
 
 ## CLI migration
 
-The old `call-mcc-peaks` command and compatibility aliases are removed. Use
-`call-bigwig-peaks --bigwigs ... --output ...`, `call-count-peaks`, or the explicit
-`call-legacy-peaks` command. Shared flags are `--thresholds`,
+The old `call-mcc-peaks` command, the torch-based `call-legacy-peaks` command
+and compatibility aliases are removed. Use `call-bigwig-peaks --bigwigs ...
+--output ...` or `call-count-peaks`. Shared flags are `--thresholds`,
 `--background-windows`, `--support-fraction` and `--threads`; the absolute vote
 threshold and BigWig read-estimation flags are no longer exposed.
