@@ -1,17 +1,26 @@
 [build-system]
-requires = ["setuptools >= 61.0", "wheel", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "lanceotron_mcc"
-authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk"} ]
-description = "Quick re-write of LanceOTron2 for MCC"
+version = "0.1.0"
+authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk" }]
+description = "Distance-aware, replicate-supported peak calling for MCC data"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GNU GENERAL PUBLIC LICENSE Version 3" }
-version = "0.1.0"
 dynamic = ["dependencies"]
-scripts = { "lanceotron-mcc" =  "lanceotron_mcc.call_peaks:main" }
+
+[project.scripts]
+lanceotron-mcc = "lanceotron_mcc.call_peaks:main"
+
+[project.optional-dependencies]
+legacy = ["torch>=2.6,<3", "pyranges"]
+dev = ["pytest>=8", "ruff>=0.9", "torch>=2.6,<3", "pyranges"]
+
+[project.urls]
+Homepage = "https://github.com/alsmith151/lanceotron-mcc"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
@@ -20,9 +29,14 @@ dependencies = { file = ["requirements.txt"] }
 packages = ["lanceotron_mcc", "lanceotron_mcc.api"]
 include-package-data = true
 
-# [tool.setuptools_scm]
-# local_scheme = "no-local-version"
-# write_to = "lanceotron_mcc/_version.py"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
-[project.urls]
-Homepage = "https://github.com/alsmith151/lanceotron-mcc"
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["test_peak_calling.ipynb"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
