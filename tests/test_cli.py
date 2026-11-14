@@ -84,7 +84,7 @@ def _shared_grid():
 def test_cli_help_groups_and_version_are_meaningful():
     help_result = _invoke("--help")
     _assert_success(help_result)
-    for command in ("call-bigwig-peaks", "call-count-peaks", "call-legacy-peaks"):
+    for command in ("call-bigwig-peaks", "call-count-peaks", "footprint", "call-legacy-peaks"):
         assert command in help_result.stdout
     assert "call-mcc-peaks" not in help_result.stdout
 
@@ -420,3 +420,84 @@ def test_cli_prevents_output_and_sidecar_paths_from_overwriting_inputs(tmp_path)
     assert sidecar.returncode != 0
     assert sidecar_input.read_bytes() == original_sidecar
 
+
+def _footprint_inputs(tmp_path):
+    pairs = tmp_path / "vp.pairs"
+    name = "read{}__vp-chr1-1000-1120__{}__1__0"
+    pairs.write_text(
+        f"{name.format(1, 'start')}\tchr1\t5051\tchr1\t1131\t+\t+\n"
+        f"{name.format(2, 'end')}\tchr1\t5061\tchr1\t990\t-\t-\n"
+    )
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(f"sample\tviewpoint\tpairs\nrep1\tvp\t{pairs.name}\n")
+    viewpoint = tmp_path / "viewpoint.bed"
+    viewpoint.write_text("chr1\t1000\t1120\tvp\n")
+    sizes = tmp_path / "chrom.sizes"
+    sizes.write_text("chr1\t10000\n")
+    peaks = tmp_path / "peaks.bed"
+    peaks.write_text("chr1\t5000\t5100\tenhancer\n")
+    return manifest, viewpoint, sizes, peaks
+
+
+def _footprint_cli(prefix, manifest, viewpoint, sizes, *extra):
+    return _invoke(
+        "footprint",
+        "--manifest",
+        manifest,
+        "--viewpoint",
+        "vp",
+        "--viewpoint-bed",
+        viewpoint,
+        "--chrom-sizes",
+        sizes,
+        "--output",
+        prefix,
+        *extra,
+    )
+
+
+def test_cli_footprint_writes_profiles_contacts_metrics_and_pdf(tmp_path):
+    pytest.importorskip("matplotlib")
+    manifest, viewpoint, sizes, peaks = _footprint_inputs(tmp_path)
+    prefix = tmp_path / "out" / "vp"
+    result = _footprint_cli(prefix, manifest, viewpoint, sizes, "--peaks", peaks)
+    _assert_success(result)
+
+    profiles = pd.read_csv(f"{prefix}.profiles.tsv.gz", sep="\t")
+    contacts = pd.read_csv(f"{prefix}.contacts.tsv", sep="\t")
+    regions = pd.read_csv(f"{prefix}.regions.tsv", sep="\t")
+    assert regions["Region"].tolist() == ["capture:oligo_1", "reporter:enhancer"]
+    assert contacts[
+        ["CapturePosition", "ReporterPosition", "CaptureDirection", "ReporterDirection"]
+    ].values.tolist() == [[989, 5060, "upstream", "downstream"], [1130, 5050, "upstream", "downstream"]]
+    reporter = profiles.loc[profiles["Region"] == "reporter:enhancer"].set_index("Position")
+    assert reporter.loc[5050, "Downstream"] == 1 and reporter.loc[5060, "Downstream"] == 1
+    assert Path(f"{prefix}.pdf").stat().st_size > 0
+
+    provenance = json.loads(Path(f"{prefix}.metrics.json").read_text())
+    assert provenance["method"] == "junction-footprint"
+    assert provenance["parameters"]["reporter_flank"] == 100
+    assert {Path(item["path"]).name for item in provenance["inputs"]} >= {"vp.pairs", "peaks.bed"}
+    assert provenance["metrics"]["samples"][0]["map_eligible_contacts"] == 2
+
+
+def test_cli_footprint_no_plot_and_validation_errors(tmp_path):
+    manifest, viewpoint, sizes, _ = _footprint_inputs(tmp_path)
+    prefix = tmp_path / "noplot"
+    _assert_success(_footprint_cli(prefix, manifest, viewpoint, sizes, "--no-plot"))
+    assert Path(f"{prefix}.profiles.tsv.gz").exists()
+    assert not Path(f"{prefix}.pdf").exists()
+
+    bad = _footprint_cli(tmp_path / "bad", manifest, viewpoint, sizes, "--no-plot",
+                         "--reporter-flank", -1)
+    assert bad.returncode == 2
+    assert "flanks" in bad.stderr
+
+    alias = _footprint_cli(tmp_path / "vp", manifest, viewpoint, sizes, "--no-plot")
+    assert alias.returncode == 0  # vp.pairs is not an output name
+    clash = tmp_path / "clash.regions.tsv"
+    clash.write_text("x")
+    manifest.write_text(f"sample\tviewpoint\tpairs\nrep1\tvp\t{clash.name}\n")
+    collide = _footprint_cli(tmp_path / "clash", manifest, viewpoint, sizes, "--no-plot")
+    assert collide.returncode == 2
+    assert "overwrite an input" in collide.stderr

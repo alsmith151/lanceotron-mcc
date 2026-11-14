@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import time
@@ -17,12 +18,13 @@ from pydantic import ValidationError
 
 from .api.adaptive import AdaptiveParams, call_adaptive_bigwigs, call_count_manifest, read_bed
 from .api.counts import load_manifest
-from .api.io import peak_memory_mb
-from .api.results import preflight_outputs, write_outputs
+from .api.io import peak_memory_mb, source_identity
+from .api.results import _json_default, _versions, preflight_outputs, write_outputs
 from .cli_options import (
     BACKGROUND,
     INPUTS,
     LEGACY,
+    LOGGING,
     BackgroundOptions,
     ChunkOptions,
     DetectionOptions,
@@ -40,12 +42,18 @@ def _version() -> str:
 app = App(
     name="lanceotron-mcc",
     version=_version,
-    help="Call MCC peaks from BigWig signal or SeqNado reporter counts.",
-    help_epilogue="All commands write BED3, a score TSV, unresolved regions and provenance JSON.",
+    help="Call MCC peaks and profile base-pair ligation-junction footprints.",
+    help_epilogue=(
+        "Peak commands write BED3, a score TSV, unresolved regions and provenance JSON; "
+        "footprint writes junction profile tables, a sparse contact map and an optional PDF."
+    ),
 )
 
 PEAK_COMMANDS = Group("Peak calling", sort_key=0)
-LEGACY_COMMANDS = Group("Original heuristic", sort_key=1)
+JUNCTION_COMMANDS = Group("Junction footprints", sort_key=1)
+LEGACY_COMMANDS = Group("Original heuristic", sort_key=2)
+JUNCTIONS = Group("Junction profiling", sort_key=1)
+PLOTTING = Group("Plotting", sort_key=2)
 
 Detection = Annotated[DetectionOptions, Parameter(name="*")]
 Background = Annotated[BackgroundOptions, Parameter(name="*")]
@@ -321,6 +329,221 @@ def call_count_peaks(
         identities=identities,
         runtime=runtime,
         bins=bins,
+    )
+
+
+def _footprint_outputs(prefix: Path, plot: bool) -> dict[str, Path]:
+    prefix = prefix.expanduser().absolute()
+    outputs = {
+        "profiles": Path(f"{prefix}.profiles.tsv.gz"),
+        "contacts": Path(f"{prefix}.contacts.tsv"),
+        "regions": Path(f"{prefix}.regions.tsv"),
+        "metrics": Path(f"{prefix}.metrics.json"),
+    }
+    if plot:
+        outputs["plot"] = Path(f"{prefix}.pdf")
+    return outputs
+
+
+def _preflight_footprint(outputs: dict[str, Path], inputs: list[Path]) -> list[dict]:
+    identities = [source_identity(path) for path in inputs]
+    sources = {Path(item["path"]).resolve() for item in identities}
+    inodes = {(path.stat().st_dev, path.stat().st_ino) for path in sources}
+    for target in outputs.values():
+        if target.is_dir():
+            raise ValueError(f"Output path is a directory: {target}")
+        if target.resolve() in sources or (
+            target.exists() and (target.stat().st_dev, target.stat().st_ino) in inodes
+        ):
+            raise ValueError(f"Output would overwrite an input file: {target}")
+    return identities
+
+
+@app.command(group=JUNCTION_COMMANDS)
+def footprint(
+    *,
+    manifest: Annotated[
+        Path,
+        Parameter(
+            group=INPUTS,
+            help="TSV with sample, viewpoint and pairs columns; paths are relative to the manifest.",
+        ),
+    ],
+    viewpoint: Annotated[
+        str, Parameter(group=INPUTS, help="Viewpoint group to select from the manifest and BED.")
+    ],
+    viewpoint_bed: ViewpointBed,
+    chrom_sizes: Annotated[
+        Path, Parameter(group=INPUTS, help="Two-column chromosome names and lengths.")
+    ],
+    output: Annotated[
+        Path,
+        Parameter(
+            group=INPUTS,
+            help="Output prefix; .profiles.tsv.gz, .contacts.tsv, .regions.tsv, "
+            ".metrics.json and .pdf are appended.",
+        ),
+    ],
+    peaks: Annotated[
+        Path | None,
+        Parameter(
+            group=INPUTS,
+            help="BED3/4 reporter regions, e.g. called peaks. Default: the capture oligo tiles.",
+        ),
+    ] = None,
+    exclude_bed: Annotated[
+        Path | None,
+        Parameter(group=INPUTS, help="BED regions whose contacts are dropped; may be empty."),
+    ] = None,
+    reporter_flank: Annotated[
+        int, Parameter(group=JUNCTIONS, help="Bases profiled either side of each reporter region.")
+    ] = 100,
+    capture_flank: Annotated[
+        int,
+        Parameter(
+            group=JUNCTIONS,
+            help="Bases either side of each oligo in which a capture junction is accepted.",
+        ),
+    ] = 50,
+    allow_unoriented: Annotated[
+        bool,
+        Parameter(
+            group=JUNCTIONS,
+            negative=[],
+            help="Keep contacts without MCCNado side/strand information as 'unknown'.",
+        ),
+    ] = False,
+    deduplicate: Annotated[
+        bool,
+        Parameter(group=JUNCTIONS, help="Collapse exact repeated read-ID/endpoint rows."),
+    ] = True,
+    orientation_source: Annotated[
+        Literal["mccnado", "unknown"],
+        Parameter(
+            group=JUNCTIONS,
+            help="Derive fragment direction from MCCNado read names, or report all as unknown.",
+        ),
+    ] = "mccnado",
+    max_profile_bases: Annotated[
+        int, Parameter(group=JUNCTIONS, help="Upper bound on profiled bases across all samples.")
+    ] = 2_000_000,
+    max_contacts: Annotated[
+        int, Parameter(group=JUNCTIONS, help="Upper bound on distinct contacts held in memory.")
+    ] = 2_000_000,
+    plot: Annotated[
+        bool, Parameter(group=PLOTTING, help="Write a PDF; requires the 'plot' extra.")
+    ] = True,
+    max_panels: Annotated[
+        int, Parameter(group=PLOTTING, help="Maximum reporter regions plotted, in input order.")
+    ] = 12,
+    arrow_length: Annotated[
+        float, Parameter(group=PLOTTING, help="Direction arrow length on the contact map, in bp.")
+    ] = 20,
+    debug: Annotated[
+        bool,
+        Parameter(
+            group=LOGGING,
+            negative=[],
+            show_default=False,
+            help="Show diagnostic logs and tracebacks for runtime errors.",
+        ),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        Parameter(
+            group=LOGGING, negative=[], show_default=False, help="Only show warnings and errors."
+        ),
+    ] = False,
+) -> None:
+    """Profile base-pair ligation junctions at capture and reporter sites.
+
+    Junction ends are counted per base and split by whether the ligated fragment
+    extends upstream or downstream of the junction, so protected sites appear as
+    footprints. Contacts with one end in a capture window and one in a reporter
+    region also form a sparse single-base capture x reporter map. Profiles are
+    descriptive; no footprint significance is estimated.
+    """
+    _configure_runtime(RuntimeOptions(debug=debug, quiet=quiet))
+    if plot:
+        try:
+            import matplotlib  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise ValueError(
+                "Plotting requires matplotlib. Run 'uv sync --extra plot' and retry with "
+                "'uv run --extra plot', or pass --no-plot."
+            ) from exc
+    if isinstance(max_panels, bool) or max_panels < 1:
+        raise ValueError("--max-panels must be a positive integer")
+    if not math.isfinite(arrow_length) or arrow_length <= 0:
+        raise ValueError("--arrow-length must be a finite positive number")
+    from .api.junctions import profile_junctions, read_peak_regions
+
+    outputs = _footprint_outputs(output, plot)
+    region_files = [viewpoint_bed, *(path for path in (peaks, exclude_bed) if path)]
+    base_inputs = [manifest, chrom_sizes, *region_files]
+    base_identities = _preflight_footprint(outputs, base_inputs)
+    sizes = _read_chrom_sizes(chrom_sizes)
+    viewpoints = read_bed(viewpoint_bed, viewpoint, require_single_group=True)
+    exclusions = read_bed(exclude_bed, allow_empty=True) if exclude_bed else {}
+    reporter_regions = read_peak_regions(peaks, sizes) if peaks else None
+    samples = load_manifest(manifest, viewpoint)
+    identities = _preflight_footprint(outputs, [*base_inputs, *samples["pairs"]])
+    if identities[: len(base_identities)] != base_identities:
+        raise ValueError("An input changed while reading junction inputs")
+    profiles, contacts, regions, metrics = profile_junctions(
+        samples,
+        viewpoint,
+        viewpoints,
+        sizes,
+        reporter_regions,
+        reporter_flank=reporter_flank,
+        capture_flank=capture_flank,
+        exclusions=exclusions,
+        allow_unoriented=allow_unoriented,
+        deduplicate=deduplicate,
+        orientation_source=orientation_source,
+        max_profile_bases=max_profile_bases,
+        max_contacts=max_contacts,
+    )
+    outputs["metrics"].parent.mkdir(parents=True, exist_ok=True)
+    profiles.to_csv(outputs["profiles"], sep="\t", index=False)
+    contacts.to_csv(outputs["contacts"], sep="\t", index=False)
+    regions.to_csv(outputs["regions"], sep="\t", index=False)
+    if plot:
+        from .api.junction_plotting import plot_junctions
+
+        plot_junctions(
+            profiles, contacts, outputs["plot"], max_panels=max_panels, arrow_length=arrow_length
+        )
+    provenance = {
+        "method": "junction-footprint",
+        "versions": _versions(),
+        "parameters": {
+            "viewpoint": viewpoint,
+            "viewpoints": viewpoints,
+            "exclusions": exclusions,
+            "reporter_flank": reporter_flank,
+            "capture_flank": capture_flank,
+            "allow_unoriented": allow_unoriented,
+            "deduplicate": deduplicate,
+            "orientation_source": orientation_source,
+            "max_profile_bases": max_profile_bases,
+            "max_contacts": max_contacts,
+            "plot": plot,
+            "max_panels": max_panels,
+            "arrow_length": arrow_length,
+        },
+        "inputs": identities,
+        "outputs": {name: str(path) for name, path in outputs.items()},
+        "metrics": metrics,
+    }
+    outputs["metrics"].write_text(json.dumps(provenance, indent=2, default=_json_default) + "\n")
+    logger.info(
+        "Wrote {} profile rows, {} sparse contacts and {} regions to {}.*",
+        len(profiles),
+        len(contacts),
+        len(regions),
+        output,
     )
 
 
