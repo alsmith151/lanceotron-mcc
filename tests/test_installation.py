@@ -20,7 +20,7 @@ def _without_legacy_dependencies(arguments):
                 raise ModuleNotFoundError(f'No module named {name!r}', name=name)
             return original_import(name, *args, **kwargs)
         builtins.__import__ = guarded_import
-        from lanceotron_mcc.call_peaks import main
+        from mcc_peaks.call_peaks import main
         main()
     """)
     return subprocess.run(

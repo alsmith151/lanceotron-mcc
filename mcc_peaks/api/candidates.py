@@ -17,9 +17,9 @@ import pydantic
 import torch
 from loguru import logger
 
-from lanceotron_mcc.api.io import BigWigReader
-from lanceotron_mcc.api.signal import add_signal, average_array, find_enriched_regions
-from lanceotron_mcc.api.utils import Chromosomes, ChromosomeStats, get_device
+from mcc_peaks.api.io import BigWigReader
+from mcc_peaks.api.signal import add_signal, average_array, find_enriched_regions
+from mcc_peaks.api.utils import Chromosomes, ChromosomeStats, get_device
 
 
 class EnrichedRegionsParams(pydantic.BaseModel):

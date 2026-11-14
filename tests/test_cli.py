@@ -38,7 +38,7 @@ def _nonzero_runs(values):
 
 def _invoke(*args):
     return subprocess.run(
-        [sys.executable, "-m", "lanceotron_mcc.call_peaks", *map(str, args)],
+        [sys.executable, "-m", "mcc_peaks.call_peaks", *map(str, args)],
         cwd=PROJECT_ROOT,
         text=True,
         capture_output=True,

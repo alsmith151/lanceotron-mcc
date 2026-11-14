@@ -62,7 +62,7 @@ def preflight_outputs(outfile: str | Path, inputs: Iterable[str | Path]) -> list
 
 def _versions() -> dict[str, str]:
     result = {}
-    for name in ("lanceotron_mcc", "pybigtools", "numpy", "scipy", "pandas", "torch"):
+    for name in ("mcc_peaks", "pybigtools", "numpy", "scipy", "pandas", "torch"):
         try:
             result[name] = version(name)
         except PackageNotFoundError:
@@ -150,7 +150,7 @@ def write_outputs(
     except (OSError, ValueError, AttributeError):
         pass
     paths.bed.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=paths.bed.parent, prefix=".lanceotron-") as staging:
+    with tempfile.TemporaryDirectory(dir=paths.bed.parent, prefix=".mcc-peaks-") as staging:
         staged = {
             target: Path(staging) / target.name for target in paths.artifacts(bins is not None)
         }

@@ -528,7 +528,7 @@ def call_adaptive_bigwigs(
         Path(scratch_dir).mkdir(parents=True, exist_ok=True)
     with (
         ExitStack() as stack,
-        tempfile.TemporaryDirectory(dir=scratch_dir, prefix="lanceotron-") as tmp,
+        tempfile.TemporaryDirectory(dir=scratch_dir, prefix="mcc-peaks-") as tmp,
     ):
         readers = [
             stack.enter_context(
@@ -659,7 +659,7 @@ def call_count_manifest(
     t0 = time.perf_counter()
     if scratch_dir:
         Path(scratch_dir).mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=scratch_dir, prefix="lanceotron-counts-") as tmp:
+    with tempfile.TemporaryDirectory(dir=scratch_dir, prefix="mcc-peaks-counts-") as tmp:
         for row in frame.itertuples(index=False):
             identity = source_identity(row.pairs)
             key = cache_key(identity, "counts", viewpoints, chrom_sizes, excluded, params.bin_size)

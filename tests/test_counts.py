@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from scipy.stats import nbinom
 
-from lanceotron_mcc.api.counts import (
+from mcc_peaks.api.counts import (
     bh_adjust,
     combine_replicate_pvalues,
     count_pairs,

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pybigtools
 
-from lanceotron_mcc.api.adaptive import AdaptiveParams, call_adaptive_bigwigs, read_bed
+from mcc_peaks.api.adaptive import AdaptiveParams, call_adaptive_bigwigs, read_bed
 
 
 def main():
@@ -25,7 +25,7 @@ def main():
         parser.error("--bigwig and --viewpoint-bed must be provided together")
     if args.scratch_dir:
         args.scratch_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=args.scratch_dir, prefix="lanceotron-benchmark-") as tmp:
+    with tempfile.TemporaryDirectory(dir=args.scratch_dir, prefix="mcc-peaks-benchmark-") as tmp:
         tmp = Path(tmp)
         if args.bigwig:
             path = args.bigwig

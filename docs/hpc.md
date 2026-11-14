@@ -9,7 +9,7 @@ In each job, activate that environment or call its installed executable directly
 From the project checkout (use an absolute executable path from other directories):
 
 ```bash
-.venv/bin/lanceotron-mcc call-bigwig-peaks \
+.venv/bin/mcc-peaks call-bigwig-peaks \
   --bigwigs rep1.bigWig rep2.bigWig --viewpoint-bed viewpoints.bed \
   --viewpoint BRD4 --scratch-dir "$TMPDIR" --output peaks.bed --threads 2
 ```

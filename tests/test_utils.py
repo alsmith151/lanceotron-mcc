@@ -1,6 +1,6 @@
 import pytest
 
-from lanceotron_mcc.api import utils
+from mcc_peaks.api import utils
 
 
 def test_standard_chromosomes_include_chr10_and_chr20_only_exact_names():

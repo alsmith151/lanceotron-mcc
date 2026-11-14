@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lanceotron_mcc"
+name = "mcc-peaks"
 version = "0.1.0"
 authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk" }]
 description = "Distance-aware, replicate-supported peak calling for MCC data"
@@ -13,7 +13,7 @@ license = { text = "GNU GENERAL PUBLIC LICENSE Version 3" }
 dynamic = ["dependencies"]
 
 [project.scripts]
-lanceotron-mcc = "lanceotron_mcc.call_peaks:main"
+mcc-peaks = "mcc_peaks.call_peaks:main"
 
 [project.optional-dependencies]
 legacy = ["torch>=2.6,<3", "pyranges"]
@@ -27,7 +27,7 @@ Homepage = "https://github.com/alsmith151/lanceotron-mcc"
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools]
-packages = ["lanceotron_mcc", "lanceotron_mcc.api"]
+packages = ["mcc_peaks", "mcc_peaks.api"]
 include-package-data = true
 
 [tool.pytest.ini_options]

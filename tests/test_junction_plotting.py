@@ -3,7 +3,7 @@ import pytest
 
 pytest.importorskip("matplotlib")
 
-from lanceotron_mcc.api.junction_plotting import plot_junctions
+from mcc_peaks.api.junction_plotting import plot_junctions
 
 
 def _profiles(regions=("reporter:peak1",)):

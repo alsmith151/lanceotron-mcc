@@ -2,9 +2,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import lanceotron_mcc.api.counts as counts_api
-from lanceotron_mcc.api.adaptive import AdaptiveParams, call_count_manifest
-from lanceotron_mcc.api.counts import (
+import mcc_peaks.api.counts as counts_api
+from mcc_peaks.api.adaptive import AdaptiveParams, call_count_manifest
+from mcc_peaks.api.counts import (
     bh_adjust,
     estimate_dispersion,
     load_manifest,

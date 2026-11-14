@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from lanceotron_mcc.api.junctions import (
+from mcc_peaks.api.junctions import (
     STALE_FORMAT_WARNING,
     profile_junctions,
     read_peak_regions,

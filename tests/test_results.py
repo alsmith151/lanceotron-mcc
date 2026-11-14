@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from lanceotron_mcc.api.results import OutputPaths, preflight_outputs, write_outputs
+from mcc_peaks.api.results import OutputPaths, preflight_outputs, write_outputs
 
 
 def _peaks(**values):

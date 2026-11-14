@@ -4,7 +4,7 @@ Install the core package and its runtime dependencies with uv:
 
 ```bash
 uv sync
-uv run lanceotron-mcc --help
+uv run mcc-peaks --help
 ```
 
 For development, sync the optional `dev` extra. It includes pytest, Ruff and the
@@ -23,12 +23,12 @@ dependencies and pass the extra when running it:
 
 ```bash
 uv sync --extra legacy
-uv run --extra legacy lanceotron-mcc call-legacy-peaks --help
+uv run --extra legacy mcc-peaks call-legacy-peaks --help
 ```
 
 Extras are selected per `uv run` invocation, so include `--extra legacy` on each
 legacy command. `footprint` PDFs likewise need the `plot` extra (matplotlib):
-`uv sync --extra plot` and `uv run --extra plot lanceotron-mcc footprint ...`, or
+`uv sync --extra plot` and `uv run --extra plot mcc-peaks footprint ...`, or
 pass `--no-plot` for tables only. The `dev` extra includes matplotlib. See [CLI reference](cli.md) for command options and
 [methods](methods.md) for detection behavior and interpretation.
 

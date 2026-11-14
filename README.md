@@ -1,4 +1,4 @@
-# lanceotron-mcc
+# mcc-peaks
 
 Distance-aware MCC peak calling from BigWig signal or SeqNado reporter events,
 with replicate support and reusable local caches, plus base-pair ligation-junction
@@ -11,7 +11,7 @@ From this repository's root:
 
 ```bash
 uv sync
-uv run lanceotron-mcc --help
+uv run mcc-peaks --help
 ```
 
 `uv sync` creates the project's `.venv` and installs this package in editable mode.
@@ -22,7 +22,7 @@ optional extras.
 ## Call BigWig peaks
 
 ```bash
-uv run lanceotron-mcc call-bigwig-peaks \
+uv run mcc-peaks call-bigwig-peaks \
   --bigwigs replicate1.bigWig replicate2.bigWig replicate3.bigWig \
   --viewpoint-bed viewpoints.bed --viewpoint BRD4 \
   --output peaks.bed
@@ -44,7 +44,7 @@ For the original heuristic, include its extra when syncing and running:
 
 ```bash
 uv sync --extra legacy
-uv run --extra legacy lanceotron-mcc call-legacy-peaks --help
+uv run --extra legacy mcc-peaks call-legacy-peaks --help
 ```
 
 Count statistics remain experimental; adjusted bin values are not peak-level FDR.

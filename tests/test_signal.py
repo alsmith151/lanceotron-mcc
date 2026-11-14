@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import torch
 
-from lanceotron_mcc.api import signal
+from mcc_peaks.api import signal
 
 
 @pytest.mark.parametrize(

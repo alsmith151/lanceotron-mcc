@@ -34,13 +34,13 @@ from .cli_options import (
 
 def _version() -> str:
     try:
-        return version("lanceotron_mcc")
+        return version("mcc_peaks")
     except PackageNotFoundError:
         return "0.1.0 (source checkout)"
 
 
 app = App(
-    name="lanceotron-mcc",
+    name="mcc-peaks",
     version=_version,
     help="Call MCC peaks and profile base-pair ligation-junction footprints.",
     help_epilogue=(

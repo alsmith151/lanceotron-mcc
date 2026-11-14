@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 import torch
 
-from lanceotron_mcc.api import candidates
+from mcc_peaks.api import candidates
 
 
 def test_params_reject_invalid_grid_and_keep_numeric_floor():

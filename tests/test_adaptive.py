@@ -5,19 +5,19 @@ import pandas as pd
 import pybigtools
 import pytest
 
-from lanceotron_mcc.api.adaptive import (
+from mcc_peaks.api.adaptive import (
     AdaptiveParams,
     _call_arrays,
     _split_valleys,
     call_adaptive_bigwigs,
     read_bed,
 )
-from lanceotron_mcc.api.background import (
+from mcc_peaks.api.background import (
     fit_distance_background,
     interval_mask,
     regions,
 )
-from lanceotron_mcc.api.io import ArrayCache
+from mcc_peaks.api.io import ArrayCache
 
 
 def write_bigwig(path: Path, values):
@@ -362,7 +362,7 @@ def test_sparse_empty_chunks_preserve_foreground_halos(tmp_path):
 @pytest.mark.parametrize("window", [1, 2, 3, 4, 20, 51, 100])
 @pytest.mark.parametrize("masked", [False, True])
 def test_shared_prefix_smoothing_matches_reference(window, masked):
-    from lanceotron_mcc.api.background import average_from_prefix, moving_average, rolling_prefix
+    from mcc_peaks.api.background import average_from_prefix, moving_average, rolling_prefix
 
     rng = np.random.default_rng(12)
     values = rng.uniform(0, 20, 51)
@@ -377,7 +377,7 @@ def test_shared_prefix_smoothing_matches_reference(window, masked):
 
 
 def test_bed_preserves_literal_na_chromosome_and_group_names(tmp_path):
-    from lanceotron_mcc.api.adaptive import read_bed
+    from mcc_peaks.api.adaptive import read_bed
 
     bed = tmp_path / "viewpoint.bed"
     bed.write_text("NA\t0\t10\tNA\n")
@@ -385,7 +385,7 @@ def test_bed_preserves_literal_na_chromosome_and_group_names(tmp_path):
 
 
 def test_profile_resolution_only_rounds_to_actual_observation_units():
-    from lanceotron_mcc.api.adaptive import _profile_bin_size
+    from mcc_peaks.api.adaptive import _profile_bin_size
 
     options = params(background_bin_size=110, bin_size=50)
     assert _profile_bin_size(1000, options) == 110
