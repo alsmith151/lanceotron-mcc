@@ -34,7 +34,7 @@ class OutputPaths:
             Path(f"{bed}.tsv"),
             Path(f"{bed}.unresolved.bed"),
             Path(f"{bed}.json"),
-            Path(f"{bed}.bins.tsv"),
+            Path(f"{bed}.bins.tsv.gz"),
         )
 
     def artifacts(self, include_bins: bool = False) -> tuple[Path, ...]:
@@ -162,7 +162,12 @@ def write_outputs(
         )
         frame.to_csv(staged[paths.table], sep="\t", index=False)
         if bins is not None:
-            bins.to_csv(staged[paths.bins], sep="\t", index=False)
+            bins.to_csv(
+                staged[paths.bins],
+                sep="\t",
+                index=False,
+                compression={"method": "gzip", "compresslevel": 6, "mtime": 0},
+            )
         staged[paths.provenance].write_text(metadata)
         if preflight_outputs(outfile, source_paths) != input_identities:
             raise ValueError("An input changed while staging outputs; outputs were not published")

@@ -49,7 +49,7 @@ def test_preflight_rejects_symlink_and_hardlink_input_aliases(tmp_path):
 
 @pytest.mark.parametrize(
     "suffix",
-    [".tsv", ".unresolved.bed", ".json", ".bins.tsv"],
+    [".tsv", ".unresolved.bed", ".json", ".bins.tsv.gz"],
 )
 def test_preflight_rejects_sidecar_collisions(tmp_path, suffix):
     outfile = tmp_path / "called.bed"

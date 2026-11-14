@@ -58,7 +58,7 @@ def _assert_sidecars(outfile, *, bins=False):
     assert Path(str(outfile) + ".unresolved.bed").exists()
     assert Path(str(outfile) + ".json").exists()
     if bins:
-        assert Path(str(outfile) + ".bins.tsv").exists()
+        assert Path(str(outfile) + ".bins.tsv.gz").exists()
 
 
 def _signal_track():
@@ -215,7 +215,7 @@ def test_cli_counts_writes_bin_q_values_and_experimental_provenance(tmp_path):
     assert "PeakQ" not in peaks.columns
     assert not peaks.empty
     assert np.isfinite(peaks.MinimumBinQ).all()
-    bins = pd.read_csv(str(outfile) + ".bins.tsv", sep="\t")
+    bins = pd.read_csv(str(outfile) + ".bins.tsv.gz", sep="\t")
     assert {"BinQ", "PValue", "Eligible", "Count:sample1"} <= set(bins.columns)
     metadata = json.loads(Path(str(outfile) + ".json").read_text())
     assert metadata["method"] == "counts"

@@ -95,7 +95,7 @@ class RuntimeOptions:
             group=RESOURCES,
             help="Array cache and working-size budget in MiB; not a hard RSS limit.",
         ),
-    ] = 512
+    ] = 2048
     scratch_dir: Annotated[
         Path | None,
         Parameter(

@@ -194,7 +194,7 @@ For `peaks.bed`:
 | `peaks.bed.unresolved.bed` | Broad unresolved regions, BED3 |
 | `peaks.bed.tsv` | All retained regions, statistics and support |
 | `peaks.bed.json` | Parameters, original input identities, versions, artifact paths and timings |
-| `peaks.bed.bins.tsv` | Count mode: all bins, eligibility, raw counts, expected values and tests |
+| `peaks.bed.bins.tsv.gz` | Count mode: all bins, eligibility, raw counts, expected values and tests |
 
 Coordinates are int64, zero-based and half-open. Count-mode summits identify the
 start of the strongest bin. `Signal`/`Sum` use normalized units across replicates;

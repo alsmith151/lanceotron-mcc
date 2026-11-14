@@ -44,7 +44,7 @@ class AdaptiveParams(BaseModel):
     alpha: float = 0.05
     bait_padding: int = 0
     chunk_size: int = 8_000_000
-    memory_budget_mb: float = 512
+    memory_budget_mb: float = 2048
     n_jobs: int = 1
 
     @model_validator(mode="after")
