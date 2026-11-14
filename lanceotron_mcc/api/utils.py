@@ -1,17 +1,13 @@
-import pathlib
-from typing import Dict, List, Literal, Optional, Tuple, Union
-
 import numpy as np
 import pandas as pd
-import polars as pl
-import pyBigWig
 import pydantic
 import pyranges as pr
-from loguru import logger
+
+from .io import BigWigReader
 
 
 class Chromosomes:
-    def __init__(self, chromosomes: List[str]):
+    def __init__(self, chromosomes: list[str]):
         self.chromosomes = set(chromosomes)
 
     def __repr__(self):
@@ -22,24 +18,17 @@ class Chromosomes:
 
     @property
     def standard_chromosomes(self):
-        include = r"(chr)?([1-9]+|X|Y)$"
-        exclude = r"(chr)?(M|Un|Random|Alt|HLA|EBV|NT|KI|GL|JH|AC|NC|NT|NW|NT_)"
-        return self.filter_chromosomes(include=include, exclude=exclude)
+        include = r"^(?:chr)?(?:[1-9]|1[0-9]|2[0-2]|X|Y)$"
+        return self.filter_chromosomes(include=include)
 
     def filter_chromosomes(self, exclude: str = None, include: str = None):
-        chrom_ser = pd.Series(list(self.chromosomes))
-
-        import warnings
-
-        warnings.filterwarnings("ignore")
+        chrom_ser = pd.Series(sorted(self.chromosomes), dtype="string")
 
         if exclude is not None:
-            chrom_ser = chrom_ser[~chrom_ser.str.contains(exclude)]
+            chrom_ser = chrom_ser[~chrom_ser.str.contains(exclude, regex=True, na=False)]
 
         if include is not None:
-            chrom_ser = chrom_ser[chrom_ser.str.contains(include)]
-
-        warnings.filterwarnings("default")
+            chrom_ser = chrom_ser[chrom_ser.str.contains(include, regex=True, na=False)]
 
         return Chromosomes(chrom_ser.tolist())
 
@@ -52,29 +41,30 @@ class Chromosomes:
 
     @classmethod
     def from_bigwig(cls, bigwig_file: str):
-        with pyBigWig.open(bigwig_file) as bw:
-            chromosomes = list(bw.chroms())
+        with BigWigReader(str(bigwig_file)) as reader:
+            return cls(chromosomes=list(reader.chroms))
 
-        return cls(chromosomes=chromosomes)
-
-    def sample(self, n: int):
-
-        chroms = list(self.chromosomes)
-        chroms_sampled = list(np.random.choice(chroms, n))
+    def sample(self, n: int, seed: int | None = None):
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0 or n > len(self.chromosomes):
+            raise ValueError("n must be between zero and the number of chromosomes")
+        chroms = sorted(self.chromosomes)
+        rng = np.random.default_rng(seed)
+        chroms_sampled = rng.choice(chroms, size=n, replace=False).tolist()
         return Chromosomes(chromosomes=chroms_sampled)
-    
+
     def __str__(self):
         return f"Chromosomes({self.chromosomes})"
 
     def __format__(self, format_spec: str) -> str:
-        return f"Chromosomes({self.chromosomes})"
-    
+        return format(str(self), format_spec)
+
     def __add__(self, other):
-        
+
         chroms_left = self.chromosomes.copy()
         chroms_right = other.chromosomes.copy()
 
         return Chromosomes(chromosomes={*chroms_left, *chroms_right})
+
 
 class ChromosomeStats(pydantic.BaseModel):
     name: str
@@ -82,17 +72,25 @@ class ChromosomeStats(pydantic.BaseModel):
     mean: float
     std: float
 
+    @pydantic.model_validator(mode="after")
+    def _validate_stats(self):
+        if self.length < 0:
+            raise ValueError("length must be non-negative")
+        if not np.isfinite(self.mean) or not np.isfinite(self.std) or self.std < 0:
+            raise ValueError("mean and std must be finite, and std must be non-negative")
+        return self
 
 
-def get_device(use_gpu: bool) -> str:
+def get_device(use_gpu: bool = True) -> str:
     """
     Get the device type (CPU or GPU) based on the environment variable.
     """
     import torch
+
     device = "cpu"
     if use_gpu and torch.cuda.is_available():
         device = "cuda"
     elif use_gpu and torch.backends.mps.is_available():
         device = "mps"
-    
+
     return device
