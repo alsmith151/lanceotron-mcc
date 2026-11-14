@@ -11,150 +11,23 @@ quality filtering remain the caller's responsibility.
 from __future__ import annotations
 
 import csv
-import gzip
 import math
-import re
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, nbinom, poisson
 
-PAIR_COLUMNS = ("readid", "chr1", "pos1", "chr2", "pos2", "strand1", "strand2")
-_PAIR_COLUMN_ALIASES = {
-    "readID": "readid",
-    "read_id": "readid",
-    "chrom1": "chr1",
-    "chrom2": "chr2",
-}
-_MCC_SIDES = {"start", "end", "all", "none"}
+from .pairs import (
+    SIDE_CODES,
+    PairReader,
+    in_intervals,
+    merge_intervals,
+    new_pairs_qc,
+)
 
-
-@dataclass(frozen=True)
-class _MCCPairMetadata:
-    parent_id: str
-    viewpoint: str
-    chromosome: str
-    start: int
-    end: int
-    side: str
-    read_number: int
-    flashed_status: int
-
-
-@dataclass(frozen=True)
-class PairRecord:
-    """A validated mapped record from a standard pairs file."""
-
-    read_id: str
-    chrom1: str
-    pos1: int
-    chrom2: str
-    pos2: int
-    strand1: str
-    strand2: str
-    metadata: _MCCPairMetadata | None
-    shape: str | None = None
-
-
-@dataclass(frozen=True)
-class PairContact:
-    """A validated pair oriented from its viewpoint capture to its reporter."""
-
-    read_id: str
-    capture_chrom: str
-    capture_pos: int
-    reporter_chrom: str
-    reporter_pos: int
-    capture_strand: str
-    reporter_strand: str
-    metadata: _MCCPairMetadata | None
-
-
-def new_pairs_qc(path: str | Path) -> dict[str, int | str]:
-    """Create a QC mapping suitable for ``iter_viewpoint_contacts`` or ``count_pairs``."""
-    return {
-        "path": str(Path(path)),
-        "reporter_end": "non-viewpoint end",
-        "capture_end": "viewpoint-matching end",
-        "count_semantics": "reporter-end pair events; not deduplicated molecules",
-        "input_pairs": 0,
-        "trans_pairs": 0,
-        "both_viewpoint_pairs": 0,
-        "non_viewpoint_pairs": 0,
-        "unmapped_pairs": 0,
-        "mcc_annotated_pairs": 0,
-        "mcc_start_pairs": 0,
-        "mcc_end_pairs": 0,
-        "mcc_all_pairs": 0,
-        "mcc_none_pairs": 0,
-        "self_contact_pairs": 0,
-        "capture_end_1_pairs": 0,
-        "capture_end_2_pairs": 0,
-        "usable_cis_depth": 0,
-        "excluded_reporter_events": 0,
-        "retained_reporter_events": 0,
-    }
-
-
-def _parse_mcc_read_id(read_id: str, chrom_sizes: Mapping[str, int]) -> _MCCPairMetadata | None:
-    """Parse a strict MCCNado SegmentMetadata suffix, if present."""
-    parts = read_id.rsplit("__", 4)
-    if len(parts) != 5:
-        return None
-    parent_id, location, side, read_number, flashed_status = parts
-    if (
-        side not in _MCC_SIDES
-        or read_number not in {"1", "2", "3"}
-        or flashed_status not in {"0", "1"}
-    ):
-        return None
-    match = re.fullmatch(r"(.+)-(-?\d+)-(-?\d+)", location)
-    if match is None:
-        raise ValueError(f"Invalid MCC read-name coordinates in {read_id!r}")
-    chrom_and_viewpoint, raw_start, raw_end = match.groups()
-    start, end = int(raw_start), int(raw_end)
-    if start < 0 or start >= end:
-        raise ValueError(f"Invalid MCC viewpoint interval in read name {read_id!r}: {start}-{end}")
-    resolved: tuple[str, str] | None = None
-    for chromosome in sorted(chrom_sizes, key=len, reverse=True):
-        suffix = f"-{chromosome}"
-        if chrom_and_viewpoint.endswith(suffix):
-            viewpoint = chrom_and_viewpoint[: -len(suffix)]
-            if viewpoint:
-                resolved = viewpoint, chromosome
-                break
-    if resolved is None:
-        raise ValueError(
-            f"Could not resolve chromosome in MCC read name {read_id!r} against supplied chromosome sizes"
-        )
-    viewpoint, chromosome = resolved
-    if end > int(chrom_sizes[chromosome]):
-        raise ValueError(
-            f"MCC viewpoint interval {chromosome}:{start}-{end} in read name {read_id!r} "
-            f"exceeds chromosome length {chrom_sizes[chromosome]}"
-        )
-    return _MCCPairMetadata(
-        parent_id, viewpoint, chromosome, start, end, side, int(read_number), int(flashed_status)
-    )
-
-
-def _parse_pair_columns(line: str, path: Path, line_number: int) -> int:
-    """Validate a standard ``#columns`` declaration and return its width."""
-    columns = line[len("#columns:") :].strip().split()
-    if len(columns) < len(PAIR_COLUMNS):
-        raise ValueError(f"{path}:{line_number}: #columns header must declare at least 7 columns")
-    first_seven = [_PAIR_COLUMN_ALIASES.get(column, column) for column in columns[:7]]
-    if first_seven != list(PAIR_COLUMNS):
-        raise ValueError(
-            f"{path}:{line_number}: #columns first 7 fields must be "
-            "readID, chr1, pos1, chr2, pos2, strand1, strand2"
-        )
-    if len(columns) != len(set(columns)):
-        raise ValueError(f"{path}:{line_number}: #columns header contains duplicate columns")
-    return len(columns)
+__all__ = ["new_pairs_qc"]
+_SIDE_NAMES = {code: name for name, code in SIDE_CODES.items()}
 
 
 def validate_manifest_frame(
@@ -275,211 +148,6 @@ def _normalize_intervals(intervals: Mapping[str, Sequence[Sequence[int]]], label
     return result
 
 
-def _contains(intervals: Sequence[tuple[int, int]], position: int) -> bool:
-    return any(start <= position < end for start, end in intervals)
-
-
-def iter_pairs(
-    path: str | Path,
-    chrom_sizes: Mapping[str, int],
-    *,
-    qc: dict[str, int | str] | None = None,
-) -> Iterator[PairRecord]:
-    """Stream validated mapped records from a standard pairs file.
-
-    The first seven standard fields are required; additional fields are ignored.
-    Returned positions are zero-based. Unmapped records are validated, counted
-    in QC, and skipped. MCC read-name metadata is parsed when its strict suffix
-    schema is present, without using it to infer pair-end capture membership.
-    """
-    sizes: dict[str, int] = {}
-    for name, size in chrom_sizes.items():
-        if isinstance(size, bool) or int(size) != size or int(size) <= 0:
-            raise ValueError(f"Invalid chromosome size for {name!r}: {size!r}")
-        sizes[str(name)] = int(size)
-    qc = qc if qc is not None else new_pairs_qc(path)
-    for key, value in new_pairs_qc(path).items():
-        qc.setdefault(key, value)
-    pair_path = Path(path)
-    opener = gzip.open if pair_path.suffix.lower() == ".gz" else open
-    declared_width: int | None = None
-    shape: str | None = None
-    try:
-        with opener(pair_path, "rt", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                line = line.rstrip("\r\n")
-                if not line:
-                    continue
-                if line.startswith("#columns:"):
-                    if declared_width is not None:
-                        raise ValueError(f"{pair_path}:{line_number}: duplicate #columns header")
-                    declared_width = _parse_pair_columns(line, pair_path, line_number)
-                    continue
-                if line.startswith("#shape:"):
-                    if shape is not None:
-                        raise ValueError(f"{pair_path}:{line_number}: duplicate #shape header")
-                    shape = line[len("#shape:") :].strip().lower()
-                    continue
-                if line.startswith("#"):
-                    continue
-                fields = line.split("\t")
-                if len(fields) < 7:
-                    raise ValueError(
-                        f"{pair_path}:{line_number}: expected at least 7 tab-separated columns, found {len(fields)}"
-                    )
-                if declared_width is not None and len(fields) != declared_width:
-                    raise ValueError(
-                        f"{pair_path}:{line_number}: row has {len(fields)} fields but "
-                        f"#columns header declares {declared_width}"
-                    )
-                read_id, chr1, raw_pos1, chr2, raw_pos2, strand1, strand2 = fields[:7]
-                metadata = _parse_mcc_read_id(read_id, sizes)
-                try:
-                    pos1, pos2 = int(raw_pos1), int(raw_pos2)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"{pair_path}:{line_number}: pair positions must be integers"
-                    ) from exc
-                unmapped = []
-                for pair_chrom, position in ((chr1, pos1), (chr2, pos2)):
-                    if pair_chrom == "!":
-                        if position != 0:
-                            raise ValueError(
-                                f"{pair_path}:{line_number}: unmapped chromosome '!' must have position 0"
-                            )
-                        unmapped.append(True)
-                        continue
-                    unmapped.append(False)
-                    if pair_chrom not in sizes:
-                        raise ValueError(
-                            f"{pair_path}:{line_number}: no chromosome size for {pair_chrom!r}"
-                        )
-                    if position < 1 or position > sizes[pair_chrom]:
-                        raise ValueError(
-                            f"{pair_path}:{line_number}: one-based position {position} is outside "
-                            f"{pair_chrom} bounds 1..{sizes[pair_chrom]}"
-                        )
-                qc["input_pairs"] += 1
-                if metadata is not None:
-                    qc["mcc_annotated_pairs"] += 1
-                    qc[f"mcc_{metadata.side}_pairs"] += 1
-                if any(unmapped):
-                    qc["unmapped_pairs"] += 1
-                    continue
-                yield PairRecord(
-                    read_id,
-                    chr1,
-                    pos1 - 1,
-                    chr2,
-                    pos2 - 1,
-                    strand1,
-                    strand2,
-                    metadata,
-                    shape,
-                )
-    except (OSError, UnicodeError) as exc:
-        raise ValueError(f"Could not read pair file {pair_path}: {exc}") from exc
-
-
-def iter_viewpoint_contacts(
-    path: str | Path,
-    chrom_sizes: Mapping[str, int],
-    viewpoint_intervals: Mapping[str, Sequence[Sequence[int]]],
-    *,
-    qc: dict[str, int | str] | None = None,
-) -> Iterator[PairContact]:
-    """Stream valid pair events oriented from one viewpoint end to its reporter.
-
-    Pair positions are zero-based, already converted by :func:`iter_pairs`.
-    Cis and trans contacts are yielded; unmapped, self
-    viewpoint, and non-viewpoint pairs are recorded in QC and skipped.
-    """
-    view = _normalize_intervals(viewpoint_intervals, "viewpoint_intervals")
-    if len(view) != 1:
-        raise ValueError("A viewpoint contact stream requires intervals on exactly one chromosome")
-    chrom = next(iter(view))
-    if chrom not in chrom_sizes:
-        raise ValueError(f"No chromosome size supplied for viewpoint chromosome {chrom!r}")
-    sizes = {str(name): int(size) for name, size in chrom_sizes.items()}
-    for start, end in view[chrom]:
-        if end > sizes[chrom]:
-            raise ValueError(
-                f"Viewpoint interval ({start}, {end}) exceeds {chrom} length {sizes[chrom]}"
-            )
-    qc = qc if qc is not None else new_pairs_qc(path)
-    defaults = new_pairs_qc(path)
-    for key, value in defaults.items():
-        qc.setdefault(key, value)
-    for record in iter_pairs(path, sizes, qc=qc):
-        mcc = record.metadata
-        if mcc is not None and mcc.side in {"all", "none"}:
-            raise ValueError(f"MCC read name has unsupported reporter side {mcc.side!r}")
-        if mcc is not None:
-            oligo_matches_view = mcc.chromosome == chrom and any(
-                mcc.start < end and start < mcc.end for start, end in view[chrom]
-            )
-            if not oligo_matches_view:
-                qc["non_viewpoint_pairs"] += 1
-                continue
-            overlap1 = record.chrom1 == mcc.chromosome and mcc.start <= record.pos1 <= mcc.end
-            overlap2 = record.chrom2 == mcc.chromosome and mcc.start <= record.pos2 <= mcc.end
-            if not overlap1 and not overlap2:
-                raise ValueError(
-                    f"MCC viewpoint oligo {mcc.chromosome}:{mcc.start}-{mcc.end} "
-                    "matches neither pair end; check the read-name annotation and alignment"
-                )
-        else:
-            overlap1 = record.chrom1 == chrom and _contains(view[chrom], record.pos1)
-            overlap2 = record.chrom2 == chrom and _contains(view[chrom], record.pos2)
-        if overlap1 and overlap2:
-            qc["both_viewpoint_pairs"] += 1
-            if mcc is not None:
-                qc["self_contact_pairs"] += 1
-            continue
-        if not overlap1 and not overlap2:
-            qc["non_viewpoint_pairs"] += 1
-            continue
-        capture_index = 1 if overlap1 else 2
-        if capture_index == 1:
-            capture_chrom, capture_pos, capture_strand = (
-                record.chrom1,
-                record.pos1,
-                record.strand1,
-            )
-            reporter_chrom, reporter_pos, reporter_strand = (
-                record.chrom2,
-                record.pos2,
-                record.strand2,
-            )
-            qc["capture_end_1_pairs"] += 1
-        else:
-            capture_chrom, capture_pos, capture_strand = (
-                record.chrom2,
-                record.pos2,
-                record.strand2,
-            )
-            reporter_chrom, reporter_pos, reporter_strand = (
-                record.chrom1,
-                record.pos1,
-                record.strand1,
-            )
-            qc["capture_end_2_pairs"] += 1
-        if reporter_chrom != chrom:
-            qc["trans_pairs"] += 1
-        else:
-            qc["usable_cis_depth"] += 1
-        yield PairContact(
-            record.read_id,
-            capture_chrom,
-            capture_pos,
-            reporter_chrom,
-            reporter_pos,
-            capture_strand,
-            reporter_strand,
-            mcc,
-        )
-
-
 def count_pairs(
     path: str | Path,
     chrom_sizes: Mapping[str, int],
@@ -525,14 +193,65 @@ def count_pairs(
             raise ValueError(f"Excluded interval exceeds {name} length {sizes[name]}")
     counts = np.zeros((chrom_length + bin_size - 1) // bin_size, dtype=np.int64)
     qc = new_pairs_qc(path)
-    for contact in iter_viewpoint_contacts(path, chrom_sizes, viewpoint_intervals, qc=qc):
-        if contact.reporter_chrom != chrom:
-            continue
-        if _contains(exclusions.get(chrom, []), contact.reporter_pos):
-            qc["excluded_reporter_events"] += 1
-            continue
-        counts[contact.reporter_pos // bin_size] += 1
-        qc["retained_reporter_events"] += 1
+    reader = PairReader(path, sizes, qc=qc)
+    code = reader.index.codes[chrom]
+    view_starts, view_ends = merge_intervals(view[chrom])
+    excluded_starts, excluded_ends = merge_intervals(exclusions.get(chrom, []))
+    for chunk in reader:
+        frame = chunk.frame
+        c1, p1 = frame["chrom1"].to_numpy(), frame["pos1"].to_numpy()
+        c2, p2 = frame["chrom2"].to_numpy(), frame["pos2"].to_numpy()
+        side = frame["side"].to_numpy()
+        meta_chrom = frame["meta_chrom"].to_numpy()
+        meta_start, meta_end = frame["meta_start"].to_numpy(), frame["meta_end"].to_numpy()
+        annotated = side >= 0
+        matches_view = annotated & (meta_chrom == code)
+        overlap = np.zeros(len(frame), dtype=bool)
+        for start, end in view[chrom]:
+            overlap |= (meta_start < end) & (start < meta_end)
+        matches_view &= overlap
+        meta1 = (c1 == meta_chrom) & (meta_start <= p1) & (p1 <= meta_end)
+        meta2 = (c2 == meta_chrom) & (meta_start <= p2) & (p2 <= meta_end)
+        unsupported = annotated & (side >= SIDE_CODES["all"])
+        failures = unsupported | (matches_view & ~meta1 & ~meta2)
+        if failures.any():
+            row = int(np.argmax(failures))
+            if unsupported[row]:
+                raise ValueError(
+                    f"MCC read name has unsupported reporter side {_SIDE_NAMES[int(side[row])]!r}"
+                )
+            raise ValueError(
+                f"MCC viewpoint oligo {chrom}:{int(meta_start[row])}-{int(meta_end[row])} "
+                "matches neither pair end; check the read-name annotation and alignment"
+            )
+        overlap1 = np.where(
+            annotated, meta1, (c1 == code) & in_intervals(p1, view_starts, view_ends)
+        )
+        overlap2 = np.where(
+            annotated, meta2, (c2 == code) & in_intervals(p2, view_starts, view_ends)
+        )
+        active = ~annotated | matches_view
+        both = active & overlap1 & overlap2
+        capture1 = active & overlap1 & ~overlap2
+        capture2 = active & ~overlap1 & overlap2
+        qc["non_viewpoint_pairs"] += int(np.sum(annotated & ~matches_view))
+        qc["non_viewpoint_pairs"] += int(np.sum(active & ~overlap1 & ~overlap2))
+        qc["both_viewpoint_pairs"] += int(both.sum())
+        qc["self_contact_pairs"] += int(np.sum(both & annotated))
+        qc["capture_end_1_pairs"] += int(capture1.sum())
+        qc["capture_end_2_pairs"] += int(capture2.sum())
+        contact = capture1 | capture2
+        reporter_chrom = np.where(capture1, c2, c1)
+        reporter_pos = np.where(capture1, p2, p1)
+        cis = contact & (reporter_chrom == code)
+        qc["trans_pairs"] += int(np.sum(contact & ~cis))
+        qc["usable_cis_depth"] += int(cis.sum())
+        positions = reporter_pos[cis]
+        dropped = in_intervals(positions, excluded_starts, excluded_ends)
+        qc["excluded_reporter_events"] += int(dropped.sum())
+        positions = positions[~dropped]
+        counts += np.bincount(positions // bin_size, minlength=len(counts)).astype(np.int64)
+        qc["retained_reporter_events"] += int(len(positions))
     return counts, qc
 
 
@@ -565,6 +284,30 @@ def estimate_dispersion(
     return max(0.0, moment) if math.isfinite(moment) else 0.0
 
 
+def _nbinom_sf():
+    """The ufunc behind ``scipy.stats.nbinom.sf`` (private in scipy.special)."""
+    try:
+        from scipy.special._ufuncs import _nbinom_sf
+    except ImportError:  # pragma: no cover - older/newer scipy layouts
+        from scipy.stats import nbinom
+
+        return lambda k, n, p: nbinom.sf(k, n, p)
+    return _nbinom_sf
+
+
+def _discrete_sf(ufunc, k: np.ndarray, *params: np.ndarray | float) -> np.ndarray:
+    """``scipy.stats`` discrete ``sf`` for integer ``k``: 1 below the support at 0.
+
+    Calls the distribution's underlying ufunc directly; importing
+    ``scipy.special`` is much cheaper than ``scipy.stats``.
+    """
+    result = np.ones(k.shape, dtype=np.float64)
+    inside = k >= 0
+    if inside.any():
+        result[inside] = ufunc(k[inside], *(p[inside] if np.ndim(p) else p for p in params))
+    return result
+
+
 def negative_binomial_pvalues(
     observed: np.ndarray, expected: np.ndarray, dispersion: float
 ) -> np.ndarray:
@@ -574,17 +317,19 @@ def negative_binomial_pvalues(
         raise ValueError("observed counts must be integers")
     if not math.isfinite(float(dispersion)) or dispersion < 0:
         raise ValueError("dispersion must be finite and non-negative")
+    from scipy import special  # deferred import
+
     result = np.ones(obs.shape, dtype=np.float64)
     positive = exp > 0
     # A zero mean assigns no probability to any positive count. Keep p=1 for
     # observed zero, and return the exact upper tail (zero) for observed > 0.
     result[(exp == 0) & (obs > 0)] = 0.0
     if dispersion == 0:
-        result[positive] = poisson.sf(obs[positive] - 1, exp[positive])
+        result[positive] = _discrete_sf(special.pdtrc, obs[positive] - 1, exp[positive])
     else:
         size = 1.0 / float(dispersion)
         prob = size / (size + exp[positive])
-        result[positive] = nbinom.sf(obs[positive] - 1, size, prob)
+        result[positive] = _discrete_sf(_nbinom_sf(), obs[positive] - 1, size, prob)
     return np.clip(np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
 
 
@@ -595,8 +340,13 @@ def combine_replicate_pvalues(pvalues: np.ndarray) -> np.ndarray:
         raise ValueError("pvalues must be a non-empty 2D array shaped (replicates, bins)")
     if not np.all(np.isfinite(p)) or np.any((p < 0) | (p > 1)):
         raise ValueError("pvalues must be finite and between 0 and 1")
+    from scipy import special  # deferred import
+
     statistic = -2.0 * np.log(np.maximum(p, np.finfo(float).tiny)).sum(axis=0)
-    combined = chi2.sf(statistic, 2 * p.shape[0])
+    # chi2.sf: 1 at or below zero, else the complemented chi-square ufunc.
+    combined = np.ones(statistic.shape, dtype=np.float64)
+    above = statistic > 0
+    combined[above] = special.chdtrc(2 * p.shape[0], statistic[above])
     return np.clip(np.nan_to_num(combined, nan=1.0), 0.0, 1.0)
 
 

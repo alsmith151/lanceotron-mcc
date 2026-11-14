@@ -6,7 +6,6 @@ import math
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -14,17 +13,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from scipy.signal import find_peaks
 
+from .. import _core
 from .background import (
-    average_from_prefix,
     fit_distance_background,
     interval_mask,
     moving_average,
     refine_regions,
-    rolling_prefix,
 )
 from .io import ArrayCache, BigWigReader, cache_key, peak_memory_mb, source_identity
+from .pairs import merge_intervals
 
 # Valley splitting is a statistical refinement with a fixed input bound. It
 # must not change when callers tune chunking or memory for execution.
@@ -45,7 +43,7 @@ class AdaptiveParams(BaseModel):
     min_read_count: int = 5
     alpha: float = 0.05
     bait_padding: int = 0
-    chunk_size: int = 1_000_000
+    chunk_size: int = 8_000_000
     memory_budget_mb: float = 512
     n_jobs: int = 1
 
@@ -191,25 +189,68 @@ def _coarse(values, bin_size):
 
 
 def _materialize(reader, chrom, tmp, name, params, sample_count):
+    """Decode one chromosome as float32, in memory or as a scratch memory map.
+
+    A persistent cache directory keeps the reader's memoised whole-chromosome
+    read; otherwise values are decoded in chunks straight into the target.
+    """
     n = reader.chroms[chrom]
-    if n * 4 <= params.memory_budget_mb * 1024**2 / (4 * sample_count):
+    in_memory = n * 4 <= params.memory_budget_mb * 1024**2 / (4 * sample_count)
+    if in_memory and reader.cache.directory is not None:
         values = reader.read(chrom)
         if np.any(values < 0):
             raise ValueError(
                 "Peak calling requires nonnegative signal; difference tracks are unsupported"
             )
         return values
-    values = np.lib.format.open_memmap(
-        Path(tmp) / f"{name}.npy", mode="w+", dtype=np.float32, shape=(n,)
+    values = (
+        np.empty(n, dtype=np.float32)
+        if in_memory
+        else np.lib.format.open_memmap(
+            Path(tmp) / f"{name}.npy", mode="w+", dtype=np.float32, shape=(n,)
+        )
     )
     for lo in range(0, n, params.chunk_size):
         hi = min(n, lo + params.chunk_size)
-        part = reader.read(chrom, lo, hi)
-        if np.any(part < 0):
-            raise ValueError("Peak calling requires nonnegative signal")
-        values[lo:hi] = part
-    values.flush()
+        if reader.read_into(chrom, lo, hi, values[lo:hi]):
+            raise ValueError(
+                "Peak calling requires nonnegative signal; difference tracks are unsupported"
+            )
     return values
+
+
+def _bin_centres(start, end, unit, chrom_length):
+    """Centres of units ``start..end`` in bp; the last unit may be truncated."""
+    positions = np.arange(start, end, dtype=np.float64) * unit + unit / 2
+    last = end - 1
+    if end > start and chrom_length - last * unit < unit:
+        positions[-1] = last * unit + (chrom_length - last * unit) / 2
+    return positions
+
+
+def _interp(x, xp, fp):
+    """``np.interp`` on the window of ``xp`` bracketing sorted ``x``.
+
+    Same brackets and arithmetic as the full call, so results are identical, but
+    slopes are only computed for the window instead of the whole profile.
+    """
+    if not len(x):
+        return np.interp(x, xp, fp)
+    lo = max(0, int(np.searchsorted(xp, x[0], side="right")) - 1)
+    hi = min(len(xp), int(np.searchsorted(xp, x[-1], side="left")) + 1)
+    return np.interp(x, xp[lo:hi], fp[lo:hi])
+
+
+def _replicate_arrays(arrays):
+    """(contiguous float array, scale) pairs for ``_core.consensus_votes``."""
+    result = []
+    for array in arrays:
+        scaled = isinstance(array, _ScaledArray)
+        values = array.array if scaled else array
+        if not isinstance(values, np.ndarray) or values.dtype not in (np.float32, np.float64):
+            values = np.asarray(values, dtype=np.float64)
+        result.append((np.ascontiguousarray(values), float(array.scale) if scaled else None))
+    return result
 
 
 def _signal_depth(values, exclusions, chunk_size):
@@ -242,6 +283,16 @@ def _masked_bins(n, bin_size, exclusions):
     return eligible
 
 
+def _find_peaks(x, prominence, distance):
+    """Peak indices as ``scipy.signal.find_peaks(x, prominence=..., distance=...)``.
+
+    Native, avoiding a ~0.5 s scipy.signal import.
+    """
+    return _core.find_peaks(
+        np.ascontiguousarray(x, dtype=np.float64), float(distance), float(prominence)
+    )
+
+
 def _split_valleys(calls, mean_slice, params, unit):
     result = []
     for start, end, unresolved in calls:
@@ -259,7 +310,7 @@ def _split_valleys(calls, mean_slice, params, unit):
         if len(values) < 3 or values.max() <= 0:
             result.append((start, end, True))
             continue
-        valleys, _ = find_peaks(
+        valleys = _find_peaks(
             -values,
             prominence=0.25 * values.max(),
             distance=max(1, math.ceil(params.min_peak_size / unit)),
@@ -329,11 +380,19 @@ def _call_arrays(
     coarse_starts = np.arange(len(expected[0]), dtype=np.int64) * profile_bin_size
     expected_positions = (
         coarse_starts + np.minimum(profile_bin_size, chrom_length - coarse_starts) / 2
-    )
-    base_expected = np.mean(expected, axis=0)
-    exclusion_units = [(start // unit, math.ceil(end / unit)) for start, end in exclusions]
-    # Reserve half for caching; estimate remaining live smoothing/index buffers.
-    bytes_per_position = 96 + 8 * len(windows)
+    ).astype(np.float64)
+    base_expected = np.ascontiguousarray(np.mean(expected, axis=0), dtype=np.float64)
+    excluded_units = [
+        (max(0, start), min(n, end))
+        for start, end in zip(
+            *merge_intervals((s // unit, math.ceil(e / unit)) for s, e in exclusions)
+        )
+        if min(n, end) > max(0, start)
+    ]
+    # Each worker holds float64 prefix sums, int64 valid counts and a validity
+    # mask over its chunk plus halo; half the budget is left for caches.
+    workers = max(1, params.n_jobs)
+    bytes_per_position = 17 * workers
     max_span = int(params.memory_budget_mb * 1024**2 * 0.45 / bytes_per_position)
     if n > max_span and max_span <= 2 * halo:
         required = math.ceil((min(n, 2 * halo + 1)) * bytes_per_position / (0.45 * 1024**2))
@@ -341,80 +400,25 @@ def _call_arrays(
             f"Background windows need memory_budget_mb >= {required}; increase budget or shorten backgrounds"
         )
     chunk = min(chunk, max(1, max_span - 2 * halo)) if n > max_span else chunk
-    # Calculate valid-base global means without materializing scaled chromosomes.
-    global_sums = np.zeros(len(arrays))
-    global_count = 0
-    for lo in range(0, n, chunk):
-        hi = min(n, lo + chunk)
-        valid = interval_mask(hi - lo, exclusion_units, offset=lo)
-        global_count += int(valid.sum())
-        for i, array in enumerate(arrays):
-            values = np.asarray(array[lo:hi], dtype=np.float64)
-            if np.any(~np.isfinite(values)) or np.any(values < 0):
-                raise ValueError("Replicate signal must contain finite nonnegative values")
-            global_sums[i] += np.sum(values[valid], dtype=np.float64)
-    global_mean = float(global_sums.sum() / (max(1, global_count) * len(arrays)))
-    with ThreadPoolExecutor(max_workers=min(params.n_jobs, len(windows))) as pool:
-        for lo in range(0, n, chunk):
-            hi = min(n, lo + chunk)
-            # Background alone cannot create a peak. On sparse MCC tracks,
-            # skip chunks with no signal within any foreground window.
-            probe_lo = max(0, lo - max(windows) // 2 - 1)
-            probe_hi = min(n, hi + max(windows) // 2 + 1)
-            has_signal = (
-                global_mean > 0
-                if max(windows) >= n
-                else any(
-                    np.any(
-                        (array.array if isinstance(array, _ScaledArray) else array)[
-                            probe_lo:probe_hi
-                        ]
-                        > 0
-                    )
-                    for array in arrays
-                )
-            )
-            if not has_signal:
-                votes[lo:hi] = 0
-                continue
-            a, b = max(0, lo - halo), min(n, hi + halo)
-            valid = interval_mask(b - a, exclusion_units, offset=a)
-            signal = mean_slice(a, b)
-            positions = (
-                np.arange(a, b) * unit + np.minimum(unit, chrom_length - np.arange(a, b) * unit) / 2
-            )
-            distance_bg = np.interp(positions, expected_positions, base_expected)
-            prefix, valid_counts = rolling_prefix(signal, valid)
-
-            def smooth(window):
-                key = cache_key(identities, "smooth", a, b, window, unit, exclusions, chrom_length)
-                value = cache.get(key)
-                if value is None:
-                    value = (
-                        np.full(b - a, global_mean)
-                        if window >= n
-                        else average_from_prefix(prefix, window, valid_counts)
-                    )
-                    value = cache.put(key, value)
-                return value
-
-            # Map avoids repeated smoothing when multiple thresholds share a scale.
-            smoothed = dict(zip(windows, pool.map(smooth, windows)))
-            local_votes = np.zeros(hi - lo, dtype=np.int32)
-            core = slice(lo - a, hi - a)
-            # Distinct bp windows may collapse to one count-bin window; retain
-            # their multiplicity in the consensus grid for transparent semantics.
-            for background in backgrounds:
-                baseline = np.maximum(distance_bg, smooth(background))[core]
-                for window_bp in params.window_sizes:
-                    observed = smoothed[max(1, math.ceil(window_bp / unit))][core]
-                    for threshold in params.thresholds:
-                        local_votes += (
-                            (observed > 0) & (observed >= threshold * baseline) & valid[core]
-                        )
-            if eligible_bins is not None:
-                local_votes[~eligible_bins[lo:hi]] = 0
-            votes[lo:hi] = local_votes
+    # Distinct bp windows may collapse to one count-bin window; the window
+    # index keeps their multiplicity in the consensus grid.
+    _core.consensus_votes(
+        _replicate_arrays(arrays),
+        excluded_units,
+        None if eligible_bins is None else np.ascontiguousarray(eligible_bins, dtype=bool),
+        expected_positions,
+        base_expected,
+        unit,
+        chrom_length,
+        windows,
+        [windows.index(max(1, math.ceil(w / unit))) for w in params.window_sizes],
+        backgrounds,
+        [float(t) for t in params.thresholds],
+        chunk,
+        halo,
+        votes,
+        threads=params.n_jobs,
+    )
     initial = max(1, math.ceil(params.support_fraction * grid_size - 1e-10))
     calls = refine_regions(
         votes,
@@ -430,14 +434,11 @@ def _call_arrays(
         start_bp, end_bp = start * unit, min(chrom_length, end * unit)
         if end_bp - start_bp < params.min_peak_size:
             continue
-        positions = (
-            np.arange(start, end) * unit
-            + np.minimum(unit, chrom_length - np.arange(start, end) * unit) / 2
-        )
+        positions = _bin_centres(start, end, unit, chrom_length)
         means, backgrounds_at_peak, sums, enrichments = [], [], [], []
         for arr, bg in zip(arrays, expected):
             observed = np.asarray(arr[start:end])
-            exp = np.interp(positions, expected_positions, bg)
+            exp = _interp(positions, expected_positions, bg)
             observed_mean = float(observed.mean())
             bg_mean = float(exp.mean())
             means.append(observed_mean)

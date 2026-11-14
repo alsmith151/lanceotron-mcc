@@ -104,4 +104,3 @@ def test_rejects_unknown_direction_and_nonpositive_arrow_length(tmp_path):
 
     with pytest.raises(ValueError, match="arrow_length"):
         plot_junctions(_profiles(), _contacts(), tmp_path / "bad.pdf", arrow_length=0)
-

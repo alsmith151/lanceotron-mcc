@@ -1,11 +1,10 @@
-"""Focused entry points for signal, raw counts and the original MCC heuristic."""
+"""Command-line entry points for signal and count peak calling and junction footprints."""
 
 from __future__ import annotations
 
 import json
 import math
 import sys
-import time
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -18,12 +17,11 @@ from pydantic import ValidationError
 
 from .api.adaptive import AdaptiveParams, call_adaptive_bigwigs, call_count_manifest, read_bed
 from .api.counts import load_manifest
-from .api.io import peak_memory_mb, source_identity
+from .api.io import source_identity
 from .api.results import _json_default, _versions, preflight_outputs, write_outputs
 from .cli_options import (
     BACKGROUND,
     INPUTS,
-    LEGACY,
     LOGGING,
     BackgroundOptions,
     ChunkOptions,
@@ -51,7 +49,6 @@ app = App(
 
 PEAK_COMMANDS = Group("Peak calling", sort_key=0)
 JUNCTION_COMMANDS = Group("Junction footprints", sort_key=1)
-LEGACY_COMMANDS = Group("Original heuristic", sort_key=2)
 JUNCTIONS = Group("Junction profiling", sort_key=1)
 PLOTTING = Group("Plotting", sort_key=2)
 
@@ -234,7 +231,14 @@ def _read_chrom_sizes(path: Path) -> dict[str, int]:
         )
     except pd.errors.EmptyDataError as exc:
         raise ValueError(f"Chromosome-size file is empty: {path}") from exc
-    if frame.shape[1] != 2 or frame[0].duplicated().any():
+    # Two-column chrom.sizes, or a samtools faidx index (.fai): name and length lead.
+    if frame.shape[1] < 2 or frame.shape[1] not in (2, 5, 6):
+        raise ValueError(
+            "Chromosome sizes require two columns (name, length) or a samtools .fai index"
+        )
+    frame = frame.iloc[:, :2]
+    frame.columns = [0, 1]
+    if frame[0].duplicated().any():
         raise ValueError("Chromosome sizes require unique names and positive integer lengths")
     if not frame[1].str.fullmatch(r"[1-9][0-9]*").all():
         raise ValueError("Chromosome lengths must be positive integers")
@@ -330,6 +334,32 @@ def call_count_peaks(
         runtime=runtime,
         bins=bins,
     )
+
+
+def _write_tsv(frame: pd.DataFrame, path: Path) -> None:
+    """Write an integer/string table as TSV (gzip for ``.gz``), using polars for speed.
+
+    Float columns are not supported; their text would differ from pandas.
+    """
+    import gzip
+
+    import polars as pl
+
+    table = pl.DataFrame(
+        {
+            name: (
+                column.to_numpy()
+                if column.dtype.kind in "iub"
+                else pl.Series(column.astype(str).tolist(), dtype=pl.String)
+            )
+            for name, column in frame.items()
+        }
+    )
+    if path.suffix == ".gz":
+        with gzip.open(path, "wb", compresslevel=6) as handle:
+            table.write_csv(handle, separator="\t")
+    else:
+        table.write_csv(path, separator="\t")
 
 
 def _footprint_outputs(prefix: Path, plot: bool) -> dict[str, Path]:
@@ -506,9 +536,8 @@ def footprint(
         max_contacts=max_contacts,
     )
     outputs["metrics"].parent.mkdir(parents=True, exist_ok=True)
-    profiles.to_csv(outputs["profiles"], sep="\t", index=False)
-    contacts.to_csv(outputs["contacts"], sep="\t", index=False)
-    regions.to_csv(outputs["regions"], sep="\t", index=False)
+    for name, frame in (("profiles", profiles), ("contacts", contacts), ("regions", regions)):
+        _write_tsv(frame, outputs[name])
     if plot:
         from .api.junction_plotting import plot_junctions
 
@@ -544,112 +573,6 @@ def footprint(
         len(contacts),
         len(regions),
         output,
-    )
-
-
-@app.command(group=LEGACY_COMMANDS)
-def call_legacy_peaks(
-    *,
-    bigwig: Annotated[Path, Parameter(group=INPUTS, help="Single BigWig signal track.")],
-    output: Output,
-    cis_chromosome: Annotated[
-        str, Parameter(group=LEGACY, help="Cis chromosome, or estimate from total signal.")
-    ] = "estimate",
-    background_chromosomes: Annotated[
-        int, Parameter(group=LEGACY, help="Number of trans chromosomes to sample.")
-    ] = 1,
-    filter_background: Annotated[
-        bool, Parameter(group=LEGACY, help="Filter using the 95th percentile of trans peak signal.")
-    ] = True,
-    filter_outliers: Annotated[
-        bool, Parameter(group=LEGACY, help="Keep extreme log-signal outliers above Q3 + 3 IQR.")
-    ] = True,
-    global_background_floor: Annotated[
-        float | Literal["mean"],
-        Parameter(group=LEGACY, help="Minimum signal threshold, or chromosome mean."),
-    ] = "mean",
-    device: Annotated[
-        Literal["auto", "cpu", "cuda", "mps"],
-        Parameter(group=LEGACY, help="Compute backend; auto chooses an available accelerator."),
-    ] = "auto",
-    seed: Annotated[
-        int, Parameter(group=LEGACY, help="Random seed for trans chromosome sampling.")
-    ] = 0,
-    detection: Detection = DetectionOptions(),
-    runtime: Runtime = RuntimeOptions(),
-) -> None:
-    """Run the original multi-window heuristic and optional intensity filters.
-
-    This method processes whole chromosomes. Its working memory can exceed the
-    cache budget; prefer call-bigwig-peaks for chunked distance-aware calling.
-    """
-    try:
-        import torch
-
-        from .api.candidates import CandidatePeakCallerMCC, CandidatePeakCallParams
-        from .api.utils import get_device
-    except ModuleNotFoundError as exc:
-        if exc.name in {"torch", "pyranges"}:
-            raise ValueError(
-                "Legacy calling requires the legacy extra. From the project checkout, run 'uv sync --extra legacy' and retry using 'uv run --extra legacy'."
-            ) from exc
-        raise
-
-    _configure_runtime(runtime)
-    grid_size = _check_detection(detection)
-    params = CandidatePeakCallParams(
-        window_sizes=list(detection.window_sizes),
-        threshold_lst=list(detection.thresholds),
-        threshold_background_lst=list(detection.background_windows),
-        threshold_initial=detection.support_fraction * grid_size,
-        min_peak_size=detection.min_peak_size,
-        max_peak_size=detection.max_peak_size,
-        background_global_min=global_background_floor,
-    )
-    selected_device = get_device(True) if device == "auto" else device
-    if selected_device == "cuda" and not torch.cuda.is_available():
-        raise ValueError("CUDA is not available; use --device cpu or auto")
-    if selected_device == "mps" and not torch.backends.mps.is_available():
-        raise ValueError("MPS is not available; use --device cpu or auto")
-    identities = preflight_outputs(output, [bigwig])
-    started = time.perf_counter()
-    with CandidatePeakCallerMCC(
-        bigwig=bigwig,
-        params=params,
-        cis_chromosome=cis_chromosome,
-        n_background=background_chromosomes,
-        apply_background_filter=filter_background,
-        apply_signal_filter=filter_outliers,
-        device=selected_device,
-        memory_budget_mb=runtime.memory_budget_mb,
-        scratch_dir=runtime.scratch_dir,
-        cache_dir=runtime.cache_dir,
-        seed=seed,
-    ) as caller:
-        peaks = caller.call_candidate_peaks(n_jobs=runtime.threads)
-        metrics = {
-            **caller.reader.metrics,
-            "cache": dict(caller.reader.cache.metrics),
-            "cis_chromosome": caller.cis_chromosome,
-            "device": selected_device,
-            "elapsed_seconds": time.perf_counter() - started,
-            "peak_memory_mb": peak_memory_mb(),
-        }
-    parameters = params.model_dump() | {
-        "seed": seed,
-        "background_chromosomes": background_chromosomes,
-        "filter_background": filter_background,
-        "filter_outliers": filter_outliers,
-        "support_fraction": detection.support_fraction,
-    }
-    _finish(
-        peaks,
-        output,
-        method="legacy",
-        parameters=parameters,
-        metrics=metrics,
-        identities=identities,
-        runtime=runtime,
     )
 
 

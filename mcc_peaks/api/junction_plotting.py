@@ -171,7 +171,10 @@ def _draw_contacts(ax: Any, contacts: pd.DataFrame, *, arrow_length: float) -> N
         else:
             ax.annotate(
                 "",
-                xy=(row.CapturePosition + dx * arrow_length, row.ReporterPosition + dy * arrow_length),
+                xy=(
+                    row.CapturePosition + dx * arrow_length,
+                    row.ReporterPosition + dy * arrow_length,
+                ),
                 xytext=(row.CapturePosition, row.ReporterPosition),
                 arrowprops={"arrowstyle": "-|>", "color": "black", "lw": 0.8, "mutation_scale": 7},
                 zorder=3,
@@ -199,7 +202,11 @@ def _page(regions: pd.DataFrame, contacts: pd.DataFrame, region: str, arrow_leng
     capture = regions.loc[regions["Region"].astype(str).str.startswith("capture:")]
     reporter = regions.loc[regions["Region"].astype(str) == region]
     region_contacts = contacts.loc[contacts["Region"].astype(str) == region]
-    chrom = ", ".join(pd.unique(reporter["Chromosome"].astype(str))) if not reporter.empty else "unknown"
+    chrom = (
+        ", ".join(pd.unique(reporter["Chromosome"].astype(str)))
+        if not reporter.empty
+        else "unknown"
+    )
     starts = reporter["RegionStart"].min() if not reporter.empty else "?"
     ends = reporter["RegionEnd"].max() if not reporter.empty else "?"
     fig.suptitle(
@@ -236,7 +243,15 @@ def plot_junctions(
     _validate(profiles, contacts)
     profiles = profiles.copy()
     contacts = contacts.copy()
-    for column in ("Position", "RegionStart", "RegionEnd", "Upstream", "Downstream", "Unknown", "Total"):
+    for column in (
+        "Position",
+        "RegionStart",
+        "RegionEnd",
+        "Upstream",
+        "Downstream",
+        "Unknown",
+        "Total",
+    ):
         profiles[column] = pd.to_numeric(profiles[column], errors="raise")
     for column in ("CapturePosition", "ReporterPosition", "Count"):
         contacts[column] = pd.to_numeric(contacts[column], errors="raise")
@@ -310,4 +325,3 @@ def plot_junctions(
             pdf.savefig(fig)
             fig.clear()
     return output_path
-

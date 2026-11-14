@@ -62,7 +62,7 @@ def preflight_outputs(outfile: str | Path, inputs: Iterable[str | Path]) -> list
 
 def _versions() -> dict[str, str]:
     result = {}
-    for name in ("mcc_peaks", "pybigtools", "numpy", "scipy", "pandas", "torch"):
+    for name in ("mcc_peaks", "pybigtools", "numpy", "scipy", "pandas", "polars"):
         try:
             result[name] = version(name)
         except PackageNotFoundError:

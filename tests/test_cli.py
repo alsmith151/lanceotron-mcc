@@ -84,9 +84,10 @@ def _shared_grid():
 def test_cli_help_groups_and_version_are_meaningful():
     help_result = _invoke("--help")
     _assert_success(help_result)
-    for command in ("call-bigwig-peaks", "call-count-peaks", "footprint", "call-legacy-peaks"):
+    for command in ("call-bigwig-peaks", "call-count-peaks", "footprint"):
         assert command in help_result.stdout
     assert "call-mcc-peaks" not in help_result.stdout
+    assert "call-legacy-peaks" not in help_result.stdout
 
     command_help = _invoke("call-bigwig-peaks", "--help")
     _assert_success(command_help)
@@ -100,45 +101,6 @@ def test_cli_help_groups_and_version_are_meaningful():
     _assert_success(version_result)
     assert re.search(r"\d+\.\d+", version_result.stdout)
     assert version_result.stdout.strip() not in {"", "0.0.0", "unknown"}
-
-
-def test_cli_legacy_writes_bed_metrics_and_provenance_sidecars(tmp_path):
-    bigwig = _write_bigwig(tmp_path / "legacy.bw", {"chr1": _signal_track()})
-    outfile = tmp_path / "legacy.bed"
-    result = _invoke(
-        "call-legacy-peaks",
-        "--bigwig",
-        bigwig,
-        "--output",
-        outfile,
-        "--cis-chromosome",
-        "chr1",
-        "--background-chromosomes",
-        0,
-        "--device",
-        "cpu",
-        "--no-filter-background",
-        "--no-filter-outliers",
-        *_shared_grid(),
-        "--global-background-floor",
-        0,
-        "--min-peak-size",
-        3,
-        "--max-peak-size",
-        50,
-        "--threads",
-        2,
-    )
-    _assert_success(result)
-    _assert_sidecars(outfile)
-    peaks = pd.read_csv(str(outfile) + ".tsv", sep="\t")
-    assert {"Signal", "Sum", "Maximum", "Summit", "Support Fraction", "Unresolved"} <= set(
-        peaks.columns
-    )
-    metadata = json.loads(Path(str(outfile) + ".json").read_text())
-    assert metadata["method"] == "legacy"
-    assert metadata["metrics"]["cis_chromosome"] == "chr1"
-    assert metadata["parameters"]["support_fraction"] == 1
 
 
 def test_cli_adaptive_reads_multiple_bigwigs_and_records_original_inputs(tmp_path):
@@ -296,8 +258,9 @@ def test_cli_lists_replicates_from_manifest(tmp_path):
     ("removed", "extra"),
     [
         ("call-mcc-peaks", ()),
+        ("call-legacy-peaks", ()),
         ("--bigwig", ()),
-        ("--outfile", ("legacy.bw",)),
+        ("--outfile", ("other.bed",)),
         ("--threshold-initial", (1,)),
         ("--threshold-lst", (1,)),
         ("--threshold-background-lst", (51,)),
@@ -306,7 +269,7 @@ def test_cli_lists_replicates_from_manifest(tmp_path):
     ],
 )
 def test_cli_rejects_removed_commands_and_option_aliases(removed, extra, tmp_path):
-    if removed == "call-mcc-peaks":
+    if removed in {"call-mcc-peaks", "call-legacy-peaks"}:
         result = _invoke(removed)
     elif removed == "--bigwig":
         result = _invoke(
@@ -320,9 +283,11 @@ def test_cli_rejects_removed_commands_and_option_aliases(removed, extra, tmp_pat
         )
     else:
         result = _invoke(
-            "call-legacy-peaks",
-            "--bigwig",
+            "call-bigwig-peaks",
+            "--bigwigs",
             tmp_path / "missing.bw",
+            "--viewpoint-bed",
+            tmp_path / "viewpoint.bed",
             "--output",
             tmp_path / "out.bed",
             removed,
@@ -358,66 +323,47 @@ def test_cli_invalid_chromosome_sizes_has_concise_error_and_debug_traceback(tmp_
 
 
 def test_cli_invalid_input_is_reported_without_traceback(tmp_path):
+    viewpoint = tmp_path / "viewpoint.bed"
+    viewpoint.write_text("chr1\t0\t10\tvp\n")
     result = _invoke(
-        "call-legacy-peaks",
-        "--bigwig",
+        "call-bigwig-peaks",
+        "--bigwigs",
         tmp_path / "missing.bw",
+        "--viewpoint-bed",
+        viewpoint,
         "--output",
         tmp_path / "x.bed",
-        "--cis-chromosome",
-        "chr1",
     )
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
 
 
 def test_cli_prevents_output_and_sidecar_paths_from_overwriting_inputs(tmp_path):
+    viewpoint = tmp_path / "viewpoint.bed"
+    viewpoint.write_text("chr1\t0\t10\tvp\n")
+
+    def call(bigwig, output):
+        return _invoke(
+            "call-bigwig-peaks",
+            "--bigwigs",
+            bigwig,
+            "--viewpoint-bed",
+            viewpoint,
+            "--output",
+            output,
+            *_shared_grid(),
+        )
+
     source = _write_bigwig(tmp_path / "source.bw", {"chr1": _signal_track()})
     original = source.read_bytes()
-    same_path = _invoke(
-        "call-legacy-peaks",
-        "--bigwig",
-        source,
-        "--output",
-        source,
-        "--cis-chromosome",
-        "chr1",
-        "--background-chromosomes",
-        0,
-        "--device",
-        "cpu",
-        "--no-filter-background",
-        "--no-filter-outliers",
-        *_shared_grid(),
-        "--global-background-floor",
-        0,
-    )
-    assert same_path.returncode != 0
+    assert call(source, source).returncode != 0
     assert source.read_bytes() == original
 
     valid_bigwig = _write_bigwig(tmp_path / "sidecar.bw", {"chr1": _signal_track()})
     sidecar_input = tmp_path / "sidecar.bed.tsv"
     valid_bigwig.rename(sidecar_input)
     original_sidecar = sidecar_input.read_bytes()
-    sidecar = _invoke(
-        "call-legacy-peaks",
-        "--bigwig",
-        sidecar_input,
-        "--output",
-        tmp_path / "sidecar.bed",
-        "--cis-chromosome",
-        "chr1",
-        "--background-chromosomes",
-        0,
-        "--device",
-        "cpu",
-        "--no-filter-background",
-        "--no-filter-outliers",
-        *_shared_grid(),
-        "--global-background-floor",
-        0,
-    )
-    assert sidecar.returncode != 0
+    assert call(sidecar_input, tmp_path / "sidecar.bed").returncode != 0
     assert sidecar_input.read_bytes() == original_sidecar
 
 
@@ -469,7 +415,10 @@ def test_cli_footprint_writes_profiles_contacts_metrics_and_pdf(tmp_path):
     assert regions["Region"].tolist() == ["capture:oligo_1", "reporter:enhancer"]
     assert contacts[
         ["CapturePosition", "ReporterPosition", "CaptureDirection", "ReporterDirection"]
-    ].values.tolist() == [[989, 5060, "upstream", "downstream"], [1130, 5050, "upstream", "downstream"]]
+    ].values.tolist() == [
+        [989, 5060, "upstream", "downstream"],
+        [1130, 5050, "upstream", "downstream"],
+    ]
     reporter = profiles.loc[profiles["Region"] == "reporter:enhancer"].set_index("Position")
     assert reporter.loc[5050, "Downstream"] == 1 and reporter.loc[5060, "Downstream"] == 1
     assert Path(f"{prefix}.pdf").stat().st_size > 0
@@ -488,8 +437,9 @@ def test_cli_footprint_no_plot_and_validation_errors(tmp_path):
     assert Path(f"{prefix}.profiles.tsv.gz").exists()
     assert not Path(f"{prefix}.pdf").exists()
 
-    bad = _footprint_cli(tmp_path / "bad", manifest, viewpoint, sizes, "--no-plot",
-                         "--reporter-flank", -1)
+    bad = _footprint_cli(
+        tmp_path / "bad", manifest, viewpoint, sizes, "--no-plot", "--reporter-flank", -1
+    )
     assert bad.returncode == 2
     assert "flanks" in bad.stderr
 
@@ -501,3 +451,16 @@ def test_cli_footprint_no_plot_and_validation_errors(tmp_path):
     collide = _footprint_cli(tmp_path / "clash", manifest, viewpoint, sizes, "--no-plot")
     assert collide.returncode == 2
     assert "overwrite an input" in collide.stderr
+
+
+def test_chrom_sizes_accept_samtools_fai_index(tmp_path):
+    from mcc_peaks.call_peaks import _read_chrom_sizes
+
+    fai = tmp_path / "genome.fa.fai"
+    fai.write_text("chr1\t1000\t6\t60\t61\nchr2\t500\t1030\t60\t61\n")
+    assert _read_chrom_sizes(fai) == {"chr1": 1000, "chr2": 500}
+
+    bad = tmp_path / "three.sizes"
+    bad.write_text("chr1\t1000\textra\n")
+    with pytest.raises(ValueError, match="two columns"):
+        _read_chrom_sizes(bad)
