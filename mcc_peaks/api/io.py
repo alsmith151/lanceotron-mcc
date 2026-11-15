@@ -234,6 +234,41 @@ class BigWigReader:
             self.metrics["input_read_seconds"] += time.perf_counter() - t0
             return self.cache.put(key, values)
 
+    def read_into(self, chrom, start, end, out):
+        """Decode ``start..end`` into float32 ``out`` without caching.
+
+        Missing bases become zero, as in :meth:`read`. Returns whether any value
+        is negative; non-finite signal raises.
+        """
+        from .. import _core
+
+        length = self.chroms.get(chrom)
+        if length is None:
+            raise ValueError(f"Chromosome {chrom!r} is absent from the BigWig")
+        if not 0 <= start <= end <= length or len(out) != end - start:
+            raise ValueError(f"Invalid interval {chrom}:{start}-{end}")
+        if end == start:
+            return False
+        with self.lock:
+            if self._handle is None:
+                raise ValueError("BigWigReader is closed")
+            t0 = time.perf_counter()
+            try:
+                values = self._handle.values(chrom, start, end)
+            except Exception as exc:
+                raise ValueError(
+                    f"Could not read BigWig {self.path} interval {chrom}:{start}-{end}: {exc}"
+                ) from exc
+            values = np.ascontiguousarray(values, dtype=np.float64)
+            if values.shape != (end - start,):
+                raise ValueError("Unexpected BigWig extraction length")
+            nonfinite, negative = _core.store_signal(values, out)
+            if nonfinite:
+                raise ValueError("BigWig contains non-finite signal")
+            self.metrics["read_calls"] += 1
+            self.metrics["input_read_seconds"] += time.perf_counter() - t0
+            return negative
+
     def stats(self, chrom):
         """Exact full-chromosome moments, with missing bases treated as zero."""
         if chrom not in self.chroms:

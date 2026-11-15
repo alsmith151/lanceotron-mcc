@@ -11,7 +11,6 @@ from cyclopts import Group, Parameter
 INPUTS = Group("Inputs", sort_key=0)
 DETECTION = Group("Peak detection", sort_key=1)
 BACKGROUND = Group("Viewpoint and background", sort_key=2)
-LEGACY = Group("Legacy filters", sort_key=3)
 RESOURCES = Group("Resources and caching", sort_key=4)
 LOGGING = Group("Logging", sort_key=5)
 
@@ -96,7 +95,7 @@ class RuntimeOptions:
             group=RESOURCES,
             help="Array cache and working-size budget in MiB; not a hard RSS limit.",
         ),
-    ] = 512
+    ] = 2048
     scratch_dir: Annotated[
         Path | None,
         Parameter(
@@ -129,5 +128,9 @@ class RuntimeOptions:
 @dataclass(frozen=True)
 class ChunkOptions:
     chunk_size: Annotated[
-        int, Parameter(group=RESOURCES, help="Adaptive/count processing chunk size in bp.")
-    ] = 1_000_000
+        int,
+        Parameter(
+            group=RESOURCES,
+            help="Upper bound on bases processed per chunk; the memory budget may lower it.",
+        ),
+    ] = 8_000_000

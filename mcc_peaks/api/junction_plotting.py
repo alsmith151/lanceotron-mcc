@@ -83,6 +83,7 @@ def _draw_profile(ax: Any, data: pd.DataFrame, *, title: str) -> None:
 
     samples = list(pd.unique(data["Sample"].fillna("(unknown sample)").astype(str)))
     colors = {sample: f"C{index % 10}" for index, sample in enumerate(samples)}
+    directional = bool(data[["Upstream", "Downstream"]].to_numpy(dtype=float).any())
     for sample in samples:
         sample_values = data.loc[data["Sample"].fillna("(unknown sample)").astype(str) == sample]
         grouped = sample_values.groupby("Position", sort=True)[
@@ -90,20 +91,35 @@ def _draw_profile(ax: Any, data: pd.DataFrame, *, title: str) -> None:
         ].sum()
         x = grouped.index.to_numpy(dtype=float)
         color = colors[sample]
-        ax.plot(x, grouped["Upstream"], color=color, linewidth=1.2, label=f"{sample} upstream")
-        ax.plot(
-            x,
-            -grouped["Downstream"],
-            color=color,
-            linewidth=1.0,
-            linestyle="--",
-            label=f"{sample} downstream",
-        )
+        # Directional traces are drawn only when some junction was oriented;
+        # otherwise their flat zero lines would imply a measured direction.
+        if directional:
+            ax.plot(x, grouped["Upstream"], color=color, linewidth=1.2, label=f"{sample} upstream")
+            ax.plot(
+                x,
+                -grouped["Downstream"],
+                color=color,
+                linewidth=1.0,
+                linestyle="--",
+                label=f"{sample} downstream",
+            )
         unknown = grouped["Unknown"].to_numpy(dtype=float)
         if np.any(unknown):
-            ax.plot(x, unknown, color=color, linewidth=0.8, linestyle=":", alpha=0.75)
+            ax.plot(
+                x,
+                unknown,
+                color=color,
+                linewidth=0.8 if directional else 1.0,
+                linestyle=":" if directional else "-",
+                alpha=0.75 if directional else 1.0,
+                label=f"{sample} direction unknown",
+            )
     ax.axhline(0, color="black", linewidth=0.6)
-    ax.set_ylabel("1 bp contacts\nupstream + / downstream −")
+    ax.set_ylabel(
+        "1 bp contacts\nupstream + / downstream −"
+        if directional
+        else "1 bp contacts\n(direction unknown)"
+    )
     ax.set_xlabel("Position (0-based bp)")
     ax.grid(axis="y", color="0.88", linewidth=0.5)
     if len(samples) <= 5:
@@ -137,23 +153,34 @@ def _draw_contacts(ax: Any, contacts: pd.DataFrame, *, arrow_length: float) -> N
     y = contacts["ReporterPosition"].to_numpy(dtype=float)
     count = contacts["Count"].to_numpy(dtype=float)
     sizes = 18 + 18 * np.log1p(count)
-    from matplotlib.colors import LogNorm
+    from matplotlib.colors import LogNorm, Normalize
+    from matplotlib.ticker import LogFormatter
 
+    low, high = float(count.min()), float(count.max())
+    # A log norm over a single value has no range, and its colorbar repeats
+    # one tick label; a constant count gets a linear bar with one tick.
+    norm = LogNorm(vmin=low, vmax=high) if high > low else Normalize(low - 0.5, high + 0.5)
     points = ax.scatter(
         x,
         y,
         c=count,
         s=sizes,
         cmap="viridis",
-        norm=LogNorm(vmin=float(count.min()), vmax=float(count.max()) * 1.000001),
+        norm=norm,
         marker="s",
         edgecolors="black",
         linewidths=0.25,
         zorder=2,
     )
     colorbar = ax.figure.colorbar(points, ax=ax, fraction=0.035, pad=0.02)
-    colorbar.set_label("Contact count (log scale)", fontsize=8)
-    colorbar.ax.tick_params(labelsize=7)
+    if high > low:
+        colorbar.set_label("Contact count (log scale)", fontsize=8)
+        colorbar.ax.yaxis.set_major_formatter(LogFormatter())
+        colorbar.ax.yaxis.set_minor_formatter(LogFormatter(labelOnlyBase=False))
+    else:
+        colorbar.set_label("Contact count", fontsize=8)
+        colorbar.set_ticks([low], labels=[f"{low:g}"])
+    colorbar.ax.tick_params(which="both", labelsize=7)
 
     for row in contacts.itertuples(index=False):
         dx = _direction_sign(row.CaptureDirection)
@@ -171,7 +198,10 @@ def _draw_contacts(ax: Any, contacts: pd.DataFrame, *, arrow_length: float) -> N
         else:
             ax.annotate(
                 "",
-                xy=(row.CapturePosition + dx * arrow_length, row.ReporterPosition + dy * arrow_length),
+                xy=(
+                    row.CapturePosition + dx * arrow_length,
+                    row.ReporterPosition + dy * arrow_length,
+                ),
                 xytext=(row.CapturePosition, row.ReporterPosition),
                 arrowprops={"arrowstyle": "-|>", "color": "black", "lw": 0.8, "mutation_scale": 7},
                 zorder=3,
@@ -199,7 +229,11 @@ def _page(regions: pd.DataFrame, contacts: pd.DataFrame, region: str, arrow_leng
     capture = regions.loc[regions["Region"].astype(str).str.startswith("capture:")]
     reporter = regions.loc[regions["Region"].astype(str) == region]
     region_contacts = contacts.loc[contacts["Region"].astype(str) == region]
-    chrom = ", ".join(pd.unique(reporter["Chromosome"].astype(str))) if not reporter.empty else "unknown"
+    chrom = (
+        ", ".join(pd.unique(reporter["Chromosome"].astype(str)))
+        if not reporter.empty
+        else "unknown"
+    )
     starts = reporter["RegionStart"].min() if not reporter.empty else "?"
     ends = reporter["RegionEnd"].max() if not reporter.empty else "?"
     fig.suptitle(
@@ -236,7 +270,15 @@ def plot_junctions(
     _validate(profiles, contacts)
     profiles = profiles.copy()
     contacts = contacts.copy()
-    for column in ("Position", "RegionStart", "RegionEnd", "Upstream", "Downstream", "Unknown", "Total"):
+    for column in (
+        "Position",
+        "RegionStart",
+        "RegionEnd",
+        "Upstream",
+        "Downstream",
+        "Unknown",
+        "Total",
+    ):
         profiles[column] = pd.to_numeric(profiles[column], errors="raise")
     for column in ("CapturePosition", "ReporterPosition", "Count"):
         contacts[column] = pd.to_numeric(contacts[column], errors="raise")
@@ -310,4 +352,3 @@ def plot_junctions(
             pdf.savefig(fig)
             fig.clear()
     return output_path
-

@@ -1,7 +1,0 @@
-loguru
-numpy>=2,<3
-pandas>=2.2.3,<3
-pybigtools>=0.2.4,<0.4
-pydantic>=2,<3
-scipy>=1.12,<2
-cyclopts>=4.5,<5

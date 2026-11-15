@@ -1,0 +1,110 @@
+name: Release
+
+# Push a tag `vX.Y.Z` matching `version` in pyproject.toml to release.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        name: Tag must match pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::Tag v$tag does not match pyproject version $ver"
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: check-version
+    uses: ./.github/workflows/ci.yml
+
+  pypi:
+    # Opt-in: set repository variable PUBLISH_PYPI=true once a PyPI trusted
+    # publisher exists. Until then, tags still produce a GitHub release and image.
+    if: vars.PUBLISH_PYPI == 'true'
+    needs: ci
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mcc-peaks
+    permissions:
+      id-token: write # PyPI trusted publishing; no API token stored
+    steps:
+      # Wheels and sdist built by the called CI workflow.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          merge-multiple: true
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: [check-version, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Wheels and sdist built by the called CI workflow.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          merge-multiple: true
+          path: dist/
+      - name: Create GitHub release with notes and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            $([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease)
+
+  docker:
+    needs: [check-version, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mcc-peaks
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test pushed image
+        run: |
+          img=ghcr.io/${{ github.repository_owner }}/mcc-peaks:${{ needs.check-version.outputs.version }}
+          docker run --rm "$img" mcc-peaks --version
+          docker run --rm "$img" python -c "import matplotlib, mcc_peaks._core"

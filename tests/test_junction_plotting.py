@@ -3,7 +3,7 @@ import pytest
 
 pytest.importorskip("matplotlib")
 
-from lanceotron_mcc.api.junction_plotting import plot_junctions
+from mcc_peaks.api.junction_plotting import plot_junctions
 
 
 def _profiles(regions=("reporter:peak1",)):
@@ -105,3 +105,66 @@ def test_rejects_unknown_direction_and_nonpositive_arrow_length(tmp_path):
     with pytest.raises(ValueError, match="arrow_length"):
         plot_junctions(_profiles(), _contacts(), tmp_path / "bad.pdf", arrow_length=0)
 
+
+def _axes():
+    from matplotlib.figure import Figure
+
+    return Figure().add_subplot()
+
+
+def test_unoriented_profiles_are_labelled_as_unknown_direction():
+    from mcc_peaks.api.junction_plotting import _draw_profile
+
+    profiles = _profiles()
+    profiles["Unknown"] = profiles["Upstream"] + profiles["Downstream"]
+    profiles[["Upstream", "Downstream"]] = 0
+    ax = _axes()
+
+    _draw_profile(ax, profiles, title="unoriented")
+
+    labels = [line.get_label() for line in ax.get_lines() if not line.get_label().startswith("_")]
+    assert labels == ["rep1 direction unknown", "rep2 direction unknown"]
+    assert "direction unknown" in ax.get_ylabel()
+
+
+def test_oriented_profiles_label_every_plotted_trace():
+    from mcc_peaks.api.junction_plotting import _draw_profile
+
+    profiles = _profiles()
+    profiles.loc[0, "Unknown"] = 1
+    ax = _axes()
+
+    _draw_profile(ax, profiles, title="oriented")
+
+    labels = [line.get_label() for line in ax.get_lines() if not line.get_label().startswith("_")]
+    assert labels == [
+        "rep1 upstream",
+        "rep1 downstream",
+        "rep1 direction unknown",
+        "rep2 upstream",
+        "rep2 downstream",
+    ]
+    assert "upstream +" in ax.get_ylabel()
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [((1, 1), ["1"]), ((1, 100), ["1", "10", "100"])],
+)
+def test_contact_colorbar_labels_are_distinct_plain_counts(counts, expected):
+    from mcc_peaks.api.junction_plotting import _draw_contacts
+
+    contacts = pd.concat([_contacts()] * len(counts), ignore_index=True)
+    contacts["Count"] = counts
+    ax = _axes()
+
+    _draw_contacts(ax, contacts, arrow_length=20)
+    colorbar_ax = ax.figure.axes[-1]
+    ax.figure.canvas.draw()
+    vmin, vmax = colorbar_ax.get_ylim()
+    labels = [
+        tick.get_text()
+        for tick, value in zip(colorbar_ax.get_yticklabels(), colorbar_ax.get_yticks())
+        if vmin <= value <= vmax and tick.get_text()
+    ]
+    assert labels == expected

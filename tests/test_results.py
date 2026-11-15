@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from lanceotron_mcc.api.results import OutputPaths, preflight_outputs, write_outputs
+from mcc_peaks.api.results import OutputPaths, preflight_outputs, write_outputs
 
 
 def _peaks(**values):
@@ -49,7 +49,7 @@ def test_preflight_rejects_symlink_and_hardlink_input_aliases(tmp_path):
 
 @pytest.mark.parametrize(
     "suffix",
-    [".tsv", ".unresolved.bed", ".json", ".bins.tsv"],
+    [".tsv", ".unresolved.bed", ".json", ".bins.tsv.gz"],
 )
 def test_preflight_rejects_sidecar_collisions(tmp_path, suffix):
     outfile = tmp_path / "called.bed"
