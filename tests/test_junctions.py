@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from lanceotron_mcc.api.junctions import (
+from mcc_peaks.api.junctions import (
     STALE_FORMAT_WARNING,
     profile_junctions,
     read_peak_regions,
@@ -95,8 +95,12 @@ def test_regions_include_flanks_and_profile_every_base(tmp_path):
 
 def test_overlapping_reporter_windows_count_capture_end_once(tmp_path):
     peaks = pd.DataFrame(
-        {"Chromosome": ["chr1", "chr1"], "Start": [5000, 5040], "End": [5100, 5200],
-         "Name": ["a", "b"]}
+        {
+            "Chromosome": ["chr1", "chr1"],
+            "Start": [5000, 5040],
+            "End": [5100, 5200],
+            "Name": ["a", "b"],
+        }
     )
     profiles, contacts, _, metrics = _run(tmp_path, _line(_name(1), 5051, 1131), peaks=peaks)
     assert sorted(contacts["Region"]) == ["reporter:a", "reporter:b"]
@@ -140,9 +144,7 @@ def test_exact_duplicates_collapse_unless_disabled(tmp_path):
 
 
 def test_same_position_different_reads_aggregate(tmp_path):
-    _, contacts, _, _ = _run(
-        tmp_path, _line(_name(1), 5051, 1131), _line(_name(2), 5051, 1131)
-    )
+    _, contacts, _, _ = _run(tmp_path, _line(_name(1), 5051, 1131), _line(_name(2), 5051, 1131))
     assert contacts["Count"].tolist() == [2]
 
 

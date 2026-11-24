@@ -34,7 +34,7 @@ class OutputPaths:
             Path(f"{bed}.tsv"),
             Path(f"{bed}.unresolved.bed"),
             Path(f"{bed}.json"),
-            Path(f"{bed}.bins.tsv"),
+            Path(f"{bed}.bins.tsv.gz"),
         )
 
     def artifacts(self, include_bins: bool = False) -> tuple[Path, ...]:
@@ -62,7 +62,7 @@ def preflight_outputs(outfile: str | Path, inputs: Iterable[str | Path]) -> list
 
 def _versions() -> dict[str, str]:
     result = {}
-    for name in ("lanceotron_mcc", "pybigtools", "numpy", "scipy", "pandas", "torch"):
+    for name in ("mcc_peaks", "pybigtools", "numpy", "scipy", "pandas", "polars"):
         try:
             result[name] = version(name)
         except PackageNotFoundError:
@@ -150,7 +150,7 @@ def write_outputs(
     except (OSError, ValueError, AttributeError):
         pass
     paths.bed.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=paths.bed.parent, prefix=".lanceotron-") as staging:
+    with tempfile.TemporaryDirectory(dir=paths.bed.parent, prefix=".mcc-peaks-") as staging:
         staged = {
             target: Path(staging) / target.name for target in paths.artifacts(bins is not None)
         }
@@ -162,7 +162,12 @@ def write_outputs(
         )
         frame.to_csv(staged[paths.table], sep="\t", index=False)
         if bins is not None:
-            bins.to_csv(staged[paths.bins], sep="\t", index=False)
+            bins.to_csv(
+                staged[paths.bins],
+                sep="\t",
+                index=False,
+                compression={"method": "gzip", "compresslevel": 6, "mtime": 0},
+            )
         staged[paths.provenance].write_text(metadata)
         if preflight_outputs(outfile, source_paths) != input_identities:
             raise ValueError("An input changed while staging outputs; outputs were not published")

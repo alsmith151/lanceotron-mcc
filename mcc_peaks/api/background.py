@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.optimize import isotonic_regression
 
 
 def regions(mask):
@@ -81,6 +80,8 @@ def fit_distance_background(
     Log-distance bands pool sparse bins; iterative masking limits domination by
     strong peaks. This is a heuristic expected signal, not a calibrated null.
     """
+    from scipy.optimize import isotonic_regression  # deferred: slow to import
+
     y = np.asarray(signal, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
     if (

@@ -1,13 +1,13 @@
 # CLI and pipeline usage
 
 Run these examples from the repository root after `uv sync`. Use
-`uv run lanceotron-mcc --help` or append `--help` to any command to inspect its
+`uv run mcc-peaks --help` or append `--help` to any command to inspect its
 options. Each command writes a BED plus score/provenance sidecars.
 
 ## BigWig calling
 
 ```bash
-uv run lanceotron-mcc call-bigwig-peaks \
+uv run mcc-peaks call-bigwig-peaks \
   --bigwigs replicate1.bigWig replicate2.bigWig replicate3.bigWig \
   --viewpoint-bed viewpoints.bed --viewpoint BRD4 \
   --exclude-bed exclusion_regions.bed --bait-padding 100 \
@@ -57,7 +57,7 @@ rep3	BRD4	mcc/replicates/rep3/ligation_junctions/BRD4.pairs.gz
 ```
 
 ```bash
-uv run lanceotron-mcc call-count-peaks \
+uv run mcc-peaks call-count-peaks \
   --manifest samples.tsv --viewpoint BRD4 --viewpoint-bed viewpoints.bed \
   --chrom-sizes hg38.chrom.sizes --exclude-bed exclusion_regions.bed \
   --bin-size 50 --min-read-count 5 --memory-budget-mb 2048 \
@@ -123,7 +123,7 @@ read pile-ups. It reads the same manifest and MCCNado `.pairs` files as
 
 ```bash
 uv sync --extra plot
-uv run --extra plot lanceotron-mcc footprint \
+uv run --extra plot mcc-peaks footprint \
   --manifest manifest.tsv --viewpoint BRD4 \
   --viewpoint-bed viewpoints.bed --chrom-sizes genome.chrom.sizes \
   --peaks brd4_peaks.bed --output footprints/BRD4
@@ -159,26 +159,6 @@ lies. Exact repeated read-ID/endpoint rows are collapsed by default
 [junction footprints](methods.md#junction-footprints) for interpretation.
 `--max-profile-bases` and `--max-contacts` bound memory use.
 
-## Original heuristic
-
-The original method has a separate command and optional dependencies:
-
-```bash
-uv sync --extra legacy
-uv run --extra legacy lanceotron-mcc call-legacy-peaks --bigwig sample.bigWig --output legacy.bed \
-  --cis-chromosome chr19 --device cpu --seed 0
-```
-
-`--device` accepts `auto`, `cpu`, `cuda` or `mps`. Whole chromosomes are processed,
-so working memory can exceed the cache budget. `--background-chromosomes` controls
-trans chromosome sampling. `--no-filter-background` disables the trans percentile
-filter; `--no-filter-outliers` disables the log-signal IQR filter. When both are
-active, their cutoffs are estimated from the same original candidate set and the
-results are intersected, so filter order does not change the result.
-
-Keep `--extra legacy` on uv run commands, so uv includes the optional Torch
-and PyRanges dependencies. Development commands use `--extra dev` instead.
-
 ## SeqNado integration
 
 Use existing replicate BigWigs for signal calling. For count mode, SeqNado already
@@ -189,15 +169,16 @@ BED and chromosome sizes.
 The BigWig invocation in a Snakemake shell block becomes:
 
 ```text
-lanceotron-mcc call-bigwig-peaks \
+mcc-peaks call-bigwig-peaks \
   --bigwigs {input.bigwigs:q} --viewpoint-bed {input.viewpoints:q} \
   --viewpoint {wildcards.viewpoint_group:q} --exclude-bed {input.exclusions:q} \
   --threads {threads} --output {output.peaks:q}
 ```
 
 Declare all replicate files and metadata as inputs, and the required artifacts as
-outputs. Use `call-count-peaks` for the manifest-based workflow. GPU resources are
-only relevant to `call-legacy-peaks`. SeqNado itself is not modified here.
+outputs. Use `call-count-peaks` for the manifest-based workflow. All commands are
+CPU-only; `--threads` parallelises the compiled vote kernel. SeqNado itself is
+not modified here.
 
 The shell example invokes the binary directly in a prepared workflow environment
 or container. Prepare that environment with uv before submitting jobs; see
@@ -213,7 +194,7 @@ For `peaks.bed`:
 | `peaks.bed.unresolved.bed` | Broad unresolved regions, BED3 |
 | `peaks.bed.tsv` | All retained regions, statistics and support |
 | `peaks.bed.json` | Parameters, original input identities, versions, artifact paths and timings |
-| `peaks.bed.bins.tsv` | Count mode: all bins, eligibility, raw counts, expected values and tests |
+| `peaks.bed.bins.tsv.gz` | Count mode: all bins, eligibility, raw counts, expected values and tests |
 
 Coordinates are int64, zero-based and half-open. Count-mode summits identify the
 start of the strongest bin. `Signal`/`Sum` use normalized units across replicates;
@@ -231,8 +212,8 @@ informational messages.
 
 ## CLI migration
 
-The old `call-mcc-peaks` command and compatibility aliases are removed. Use
-`call-bigwig-peaks --bigwigs ... --output ...`, `call-count-peaks`, or the explicit
-`call-legacy-peaks` command. Shared flags are `--thresholds`,
+The old `call-mcc-peaks` command, the torch-based `call-legacy-peaks` command
+and compatibility aliases are removed. Use `call-bigwig-peaks --bigwigs ...
+--output ...` or `call-count-peaks`. Shared flags are `--thresholds`,
 `--background-windows`, `--support-fraction` and `--threads`; the absolute vote
 threshold and BigWig read-estimation flags are no longer exposed.

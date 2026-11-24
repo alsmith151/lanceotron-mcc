@@ -5,7 +5,7 @@ import numpy as np
 import pybigtools
 import pytest
 
-from lanceotron_mcc.api.io import ArrayCache, BigWigReader, cache_key, source_identity
+from mcc_peaks.api.io import ArrayCache, BigWigReader, cache_key, source_identity
 
 CHROMS = {"chr1": 8}
 RECORDS = [("chr1", 0, 2, 2.0), ("chr1", 4, 7, 1.0)]
@@ -148,7 +148,7 @@ def test_reader_replaces_incomplete_staged_copy(tmp_path):
 
 
 def test_backend_open_errors_include_bigwig_path(tmp_path, monkeypatch):
-    import lanceotron_mcc.api.io as io
+    import mcc_peaks.api.io as io
 
     path = tmp_path / "signal.bw"
     write_bigwig(path)

@@ -11,3 +11,8 @@ dist/
 # Local example data (large, regenerate from MCCNado)
 example/
 /viewpoints.bed
+
+# Rust build outputs
+target/
+mcc_peaks/_core*.so
+mcc_peaks/_core*.pyd

@@ -5,17 +5,16 @@ import pandas as pd
 import pytest
 from scipy.stats import nbinom
 
-from lanceotron_mcc.api.counts import (
+from mcc_peaks.api.counts import (
     bh_adjust,
     combine_replicate_pvalues,
     count_pairs,
     estimate_dispersion,
-    iter_pairs,
-    iter_viewpoint_contacts,
     load_manifest,
     negative_binomial_pvalues,
     validate_manifest_frame,
 )
+from mcc_peaks.api.pairs import SIDE_CODES, PairReader
 
 
 def test_manifest_filters_viewpoint_and_resolves_paths(tmp_path):
@@ -121,27 +120,19 @@ def test_pair_events_are_zero_based_binned_and_exclusions_are_reporter_side(tmp_
     assert "not deduplicated molecules" in qc["count_semantics"]
 
 
-def test_contact_iterator_yields_zero_based_cis_and_trans_contacts_with_qc(tmp_path):
+def test_viewpoint_contacts_are_zero_based_with_cis_and_trans_qc(tmp_path):
     pairs = tmp_path / "contacts.pairs"
     pairs.write_text("cis\tchr1\t111\tchr1\t1\t+\t-\ntrans\tchr2\t5\tchr1\t112\t-\t+\n")
-    qc = {}
-    contacts = list(
-        iter_viewpoint_contacts(pairs, {"chr1": 300, "chr2": 100}, {"chr1": [(100, 120)]}, qc=qc)
-    )
-    assert [
-        (c.read_id, c.capture_chrom, c.capture_pos, c.reporter_chrom, c.reporter_pos)
-        for c in contacts
-    ] == [
-        ("cis", "chr1", 110, "chr1", 0),
-        ("trans", "chr1", 111, "chr2", 4),
-    ]
-    assert [(c.capture_strand, c.reporter_strand) for c in contacts] == [("+", "-"), ("+", "-")]
+    counts, qc = count_pairs(pairs, {"chr1": 300, "chr2": 100}, {"chr1": [(100, 120)]}, bin_size=1)
+    assert counts[0] == 1 and counts.sum() == 1
     assert qc["input_pairs"] == 2
+    assert qc["capture_end_1_pairs"] == 1
+    assert qc["capture_end_2_pairs"] == 1
     assert qc["trans_pairs"] == 1
     assert qc["usable_cis_depth"] == 1
 
 
-def test_raw_pair_iterator_keeps_tiled_pool_contacts_without_oligo_endpoint(tmp_path):
+def test_pair_reader_keeps_tiled_pool_contacts_without_oligo_endpoint(tmp_path):
     pairs = tmp_path / "tiled.pairs"
     pairs.write_text(
         "#shape: upper triangle\n"
@@ -149,24 +140,24 @@ def test_raw_pair_iterator_keeps_tiled_pool_contacts_without_oligo_endpoint(tmp_
         "chr1\t3300000\tchr1\t3300150\t+\t-\n"
     )
     qc = {}
-    records = list(
-        iter_pairs(
-            pairs,
-            {"chr1": 10_000_000, "chr11": 50_000_000},
-            qc=qc,
-        )
-    )
-    assert len(records) == 1
-    record = records[0]
-    assert (record.chrom1, record.pos1, record.chrom2, record.pos2) == (
+    reader = PairReader(pairs, {"chr1": 10_000_000, "chr11": 50_000_000}, qc=qc)
+    chunks = list(reader)
+    assert len(chunks) == 1 and chunks[0].frame.height == 1
+    row = chunks[0].frame.row(0, named=True)
+    names = reader.index.names
+    assert (names[row["chrom1"]], row["pos1"], names[row["chrom2"]], row["pos2"]) == (
         "chr1",
         3_299_999,
         "chr1",
         3_300_149,
     )
-    assert record.metadata is not None
-    assert (record.metadata.viewpoint, record.metadata.chromosome) == ("Hba-a1", "chr11")
-    assert record.shape == "upper triangle"
+    assert row["side"] == SIDE_CODES["start"]
+    assert (names[row["meta_chrom"]], row["meta_start"], row["meta_end"]) == (
+        "chr11",
+        32_200_000,
+        32_200_020,
+    )
+    assert chunks[0].shape == "upper triangle"
     assert qc["input_pairs"] == 1
     assert qc["mcc_annotated_pairs"] == 1
 
