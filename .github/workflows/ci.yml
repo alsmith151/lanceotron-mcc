@@ -22,6 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          python-version: "3.12"
       - name: Lockfile matches pyproject
         run: uv lock --check
       - run: uv run --locked --extra dev ruff check .
@@ -66,6 +67,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          python-version: "3.12"
       - run: uv sync --locked --no-dev
       - run: uv run --no-sync mcc-peaks --version
       - run: uv run --no-sync mcc-peaks call-bigwig-peaks --help > /dev/null
@@ -82,7 +84,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64 }
           - { os: ubuntu-latest, target: aarch64 }
           - { os: macos-latest, target: aarch64 }
-          - { os: macos-13, target: x86_64 }
+          - { os: macos-15-intel, target: x86_64 }
     steps:
       - uses: actions/checkout@v5
       - uses: PyO3/maturin-action@v1
@@ -90,6 +92,10 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist
           manylinux: auto
+      - uses: actions/setup-python@v6
+        if: matrix.target == 'x86_64' && runner.os == 'Linux' || matrix.target == 'aarch64' && runner.os == 'macOS'
+        with:
+          python-version: "3.12"
       - name: Wheel installs and runs in a clean env
         if: matrix.target == 'x86_64' && runner.os == 'Linux' || matrix.target == 'aarch64' && runner.os == 'macOS'
         run: |
