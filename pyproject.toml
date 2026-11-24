@@ -1,28 +1,76 @@
 [build-system]
-requires = ["setuptools >= 61.0", "wheel", "setuptools_scm[toml]>=6.2"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
 
 [project]
-name = "lanceotron_mcc"
-authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk"} ]
-description = "Quick re-write of LanceOTron2 for MCC"
+name = "mcc-peaks"
+version = "0.1.0"
+authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk" }]
+description = "Distance-aware, replicate-supported peak calling for MCC data"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GNU GENERAL PUBLIC LICENSE Version 3" }
-version = "0.1.0"
-dynamic = ["dependencies"]
-scripts = { "lanceotron-mcc" =  "lanceotron_mcc.call_peaks:main" }
+dependencies = [
+    "cyclopts>=4.5,<5",
+    "loguru",
+    "numpy>=2,<3",
+    "pandas>=2.2.3,<3",
+    "polars>=1.20,<2",
+    "pybigtools>=0.2.4,<0.4",
+    "pydantic>=2,<3",
+    "scipy>=1.12,<2",
+]
+keywords = ["MCC", "Micro-Capture-C", "chromatin conformation", "peak calling", "bioinformatics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+[project.scripts]
+mcc-peaks = "mcc_peaks.call_peaks:main"
 
-[tool.setuptools]
-packages = ["lanceotron_mcc", "lanceotron_mcc.api"]
-include-package-data = true
-
-# [tool.setuptools_scm]
-# local_scheme = "no-local-version"
-# write_to = "lanceotron_mcc/_version.py"
+[project.optional-dependencies]
+plot = ["matplotlib>=3.8,<4"]
+dev = ["pytest>=8", "ruff>=0.9", "maturin>=1.9,<2", "matplotlib>=3.8,<4"]
 
 [project.urls]
 Homepage = "https://github.com/alsmith151/lanceotron-mcc"
+Source = "https://github.com/alsmith151/lanceotron-mcc"
+Issues = "https://github.com/alsmith151/lanceotron-mcc/issues"
+Changelog = "https://github.com/alsmith151/lanceotron-mcc/releases"
+
+[tool.maturin]
+# Mixed Rust/Python package: compiled kernels are mcc_peaks._core.
+module-name = "mcc_peaks._core"
+profile = "release"
+python-packages = ["mcc_peaks"]
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.uv]
+# Rebuild the compiled extension when Rust sources change.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]

@@ -1,0 +1,26 @@
+[package]
+name = "mcc-peaks"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Compiled kernels for mcc-peaks"
+license = "GPL-3.0-only"
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[features]
+# maturin enables `extension-module` (see pyproject.toml). Plain `cargo test`
+# builds only the pure-Rust kernels, so it needs no Python to link or run.
+python = ["dep:pyo3", "dep:numpy"]
+extension-module = ["python", "pyo3/extension-module"]
+
+[dependencies]
+numpy = { version = "0.30.0", optional = true }
+pyo3 = { version = "0.30.1", features = ["abi3-py310"], optional = true }
+rayon = "1.12.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
